@@ -15,9 +15,5 @@ COPY . .
 
 # Expose the port the app runs on
 EXPOSE 8050
-
-# Define environment variable
-ENV PYTHONUNBUFFERED=1
-
 # Command to run the application
 CMD ["python", "app.py"]
