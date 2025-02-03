@@ -1,7 +1,7 @@
 import config
 import dash
 import pandas as pd
-from dash import Dash, dash_table, dcc, html
+from dash import Dash, dash_table, dcc, html, Input, Output, callback
 from sqlalchemy import create_engine
 
 # Register the page
@@ -18,6 +18,12 @@ engine = create_engine(connection_string)
 # Fetch grades from the database
 grades = pd.read_sql("SELECT id, cm.name->>'en' AS grade FROM class_master cm", engine)
 
+# Schools List
+schools = pd.read_sql("SELECT name as school_name FROM school", engine)
+schools = pd.concat(
+    [schools, pd.DataFrame({"school_name": ["No School"]})], ignore_index=True
+)
+
 # Fetch all learners' data for non-diagnostic sheets
 all_learners_data = pd.read_sql(
     f"""
@@ -28,17 +34,20 @@ all_learners_data = pd.read_sql(
     lpd.updated_at,
     lpd.taxonomy->'class'->'name'->'en' AS qset_grade,
     lpd.taxonomy->'l1_skill'->'name'->'en' AS operation,
-    cm.name->>'en' AS grade
+    cm.name->>'en' AS grade,
+    sc.name AS school
     FROM learner_proficiency_question_level_data lpd
     LEFT JOIN question_set qs ON lpd.question_set_id = qs.identifier
     LEFT JOIN learner lr ON lpd.learner_id = lr.identifier
     LEFT JOIN class_master cm ON lr.taxonomy->'class'->>'identifier' = cm.identifier
+    LEFT JOIN school sc ON lr.school_id = sc.identifier
     WHERE qs.purpose != 'Main Diagnostic'
     """,
     engine,
 )
 # Convert 'updated_at' to datetime
 all_learners_data["updated_at"] = pd.to_datetime(all_learners_data["updated_at"])
+all_learners_data["school"].fillna("No School", inplace=True)
 
 # Fetch the last question per question set and grade
 last_question_per_qset_grade = pd.read_sql(
@@ -85,7 +94,7 @@ operations_priority = {
 grades_priority = grades.set_index("grade").to_dict().get("id")
 
 # Merge learners' data with the last question data
-learner_progress_df = pd.merge(
+learner_progress_data = pd.merge(
     all_learners_data,
     last_question_per_qset_grade,
     on=["operation", "qset_grade", "question_set_id", "question_id"],
@@ -93,161 +102,183 @@ learner_progress_df = pd.merge(
     indicator=True,
 )
 # Determine if the last question is found
-learner_progress_df["is_found"] = learner_progress_df["_merge"].apply(
+learner_progress_data["is_found"] = learner_progress_data["_merge"].apply(
     lambda x: 1 if x == "both" else 0
 )
-learner_progress_df.drop(columns=["_merge"], inplace=True)
+learner_progress_data.drop(columns=["_merge"], inplace=True)
 
-# Group by learner, grade, operation, qset_grade and calculate if the last question is answered for the qset_grade of that operation by the learner
-learner_progress_df = (
-    learner_progress_df.groupby(
-        ["learner_id", "grade", "operation", "qset_grade"], observed=False
-    )
-    .agg(is_last=("is_found", "any"))
-    .reset_index()
+
+@callback(
+    Output("dig-l-prog-data-table", "data"),
+    Input("dig-l-prog-schools-dropdown", "value"),
 )
+def update_table(selected_school):
+    # Filter the DataFrame based on the selected schools
+    if selected_school:
+        learner_progress_df = learner_progress_data[
+            learner_progress_data["school"] == selected_school
+        ].copy()
+    else:
+        learner_progress_df = learner_progress_data.copy()
 
-# Map operation and grade to their order
-learner_progress_df.loc[:, "operation_order"] = learner_progress_df["operation"].map(
-    operations_priority
-)
-learner_progress_df.loc[:, "qset_grade_order"] = learner_progress_df["qset_grade"].map(
-    grades_priority
-)
-
-# Sort the dataframe by learner, operation, and qset_grade order
-learner_progress_df.sort_values(
-    by=["learner_id", "operation_order", "qset_grade_order"],
-    ascending=[True, True, True],
-    inplace=True,
-)
-
-# Determine the next grade for each learner
-learner_progress_df["next_grade"] = learner_progress_df.groupby("learner_id")[
-    "qset_grade"
-].shift(-1)
-
-# Map current grades to target grades
-target_grade_map = {
-    "class-two": "class-one",
-    "class-three": "class-two",
-    "class-four": "class-three",
-    "class-five": "class-four",
-    "class-six": "class-five",
-}
-
-learner_progress_df["target_grade"] = learner_progress_df["grade"].map(target_grade_map)
-
-
-# Function to set the current grade for each learner
-def set_curr_grade(group):
-    # Sort the group by operation and grade order
-    group.sort_values(
-        by=["operation_order", "qset_grade_order"], ascending=[True, True], inplace=True
-    )
-    # Get the last record of the group
-    last_record = group.iloc[-1]
-    target_grade = last_record["target_grade"]
-    qset_grade = last_record["qset_grade"]
-    next_grade = last_record["next_grade"]
-    curr_grade = qset_grade
-
-    # Check if this is the last record for the learner or has next_grade
-    if last_record["is_last"] == True or not pd.isna(next_grade):
-        # Check if the target_grade and qset_grade match
-        if target_grade == qset_grade:
-            curr_grade = "target-achieved"
-        elif qset_grade == "class-one":
-            curr_grade = "class-two"
-        elif qset_grade == "class-two":
-            curr_grade = "class-three"
-        elif qset_grade == "class-three":
-            curr_grade = "class-four"
-        elif qset_grade == "class-four":
-            curr_grade = "class-five"
-        elif qset_grade == "class-five":
-            curr_grade = "class-six"
-
-    group["current_grade"] = curr_grade
-    return group
-
-
-# Apply the function to set the current grade for each learner
-learner_progress_df = (
-    learner_progress_df.groupby(
-        ["learner_id", "operation", "grade", "target_grade"], observed=False
-    )
-    .apply(set_curr_grade)
-    .reset_index(drop=True)
-)
-
-# Sort the dataframe again after setting current grades
-learner_progress_df.sort_values(
-    by=["learner_id", "operation_order", "qset_grade_order"],
-    ascending=[True, True, True],
-    inplace=True,
-)
-
-# Determine the starting grade for each learner
-learner_progress_df["starting_grade"] = learner_progress_df.groupby(
-    ["learner_id", "grade", "operation"], observed=False
-)["qset_grade"].transform("first")
-
-# Count the number of learners for each operation and starting grade
-learner_progress_df["learners_count"] = learner_progress_df.groupby(
-    ["operation", "starting_grade", "grade"], observed=False
-)["learner_id"].transform("nunique")
-
-# Create a pivot table to summarize the progress
-progress_df = pd.pivot_table(
-    learner_progress_df,
-    index=["operation", "starting_grade", "target_grade"],
-    columns=["current_grade"],
-    values=["learner_id", "learners_count"],
-    aggfunc={"learner_id": "nunique", "learners_count": "first"},
-)
-progress_df = round(progress_df["learner_id"] / progress_df["learners_count"], 2) * 100
-final_df = progress_df.reset_index()
-
-# Add % sign to respective qset-grades columns
-for column in final_df.columns:
-    if column in [
-        "class-one",
-        "class-two",
-        "class-three",
-        "class-four",
-        "class-five",
-        "target-achieved",
-    ]:
-        final_df[column] = final_df[column].apply(
-            lambda x: f"{x} %" if pd.notna(x) else x
+    # Group by learner, grade, operation, qset_grade and calculate if the last question is answered for the qset_grade of that operation by the learner
+    learner_progress_df = (
+        learner_progress_df.groupby(
+            ["learner_id", "grade", "operation", "qset_grade"], observed=False
         )
+        .agg(is_last=("is_found", "any"))
+        .reset_index()
+    )
 
-# Calculate the total number of learners for each operation and starting grade
-final_df["learners_count"] = (
-    learner_progress_df.groupby(
-        ["operation", "starting_grade", "target_grade"], observed=False
-    )["learner_id"]
-    .agg("nunique")
-    .reset_index()["learner_id"]
-)
-final_df["total_count"] = final_df.groupby(["operation", "starting_grade"])[
-    "learners_count"
-].transform("sum")
+    # Map operation and grade to their order
+    learner_progress_df.loc[:, "operation_order"] = learner_progress_df[
+        "operation"
+    ].map(operations_priority)
+    learner_progress_df.loc[:, "qset_grade_order"] = learner_progress_df[
+        "qset_grade"
+    ].map(grades_priority)
 
-# Map operation and grade to their order for sorting
-final_df.loc[:, "operation_order"] = final_df["operation"].map(operations_priority)
-final_df.loc[:, "starting_grade_order"] = final_df["starting_grade"].map(
-    grades_priority
-)
-final_df.loc[:, "target_grade_order"] = final_df["target_grade"].map(grades_priority)
+    # Sort the dataframe by learner, operation, and qset_grade order
+    learner_progress_df.sort_values(
+        by=["learner_id", "operation_order", "qset_grade_order"],
+        ascending=[True, True, True],
+        inplace=True,
+    )
 
-# Sort the final dataframe
-final_df.sort_values(
-    by=["operation_order", "starting_grade_order", "target_grade_order"],
-    ascending=[True, True, True],
-    inplace=True,
-)
+    # Determine the next grade for each learner
+    learner_progress_df["next_grade"] = learner_progress_df.groupby("learner_id")[
+        "qset_grade"
+    ].shift(-1)
+
+    # Map current grades to target grades
+    target_grade_map = {
+        "class-two": "class-one",
+        "class-three": "class-two",
+        "class-four": "class-three",
+        "class-five": "class-four",
+        "class-six": "class-five",
+    }
+
+    learner_progress_df["target_grade"] = learner_progress_df["grade"].map(
+        target_grade_map
+    )
+
+    # Function to set the current grade for each learner
+    def set_curr_grade(group):
+        # Sort the group by operation and grade order
+        group.sort_values(
+            by=["operation_order", "qset_grade_order"],
+            ascending=[True, True],
+            inplace=True,
+        )
+        # Get the last record of the group
+        last_record = group.iloc[-1]
+        target_grade = last_record["target_grade"]
+        qset_grade = last_record["qset_grade"]
+        next_grade = last_record["next_grade"]
+        curr_grade = qset_grade
+
+        # Check if this is the last record for the learner or has next_grade
+        if last_record["is_last"] == True or not pd.isna(next_grade):
+            # Check if the target_grade and qset_grade match
+            if target_grade == qset_grade:
+                curr_grade = "target-achieved"
+            elif qset_grade == "class-one":
+                curr_grade = "class-two"
+            elif qset_grade == "class-two":
+                curr_grade = "class-three"
+            elif qset_grade == "class-three":
+                curr_grade = "class-four"
+            elif qset_grade == "class-four":
+                curr_grade = "class-five"
+            elif qset_grade == "class-five":
+                curr_grade = "class-six"
+
+        group["current_grade"] = curr_grade
+        return group
+
+    # Apply the function to set the current grade for each learner
+    learner_progress_df = (
+        learner_progress_df.groupby(
+            ["learner_id", "operation", "grade", "target_grade"], observed=False
+        )
+        .apply(set_curr_grade)
+        .reset_index(drop=True)
+    )
+
+    # Sort the dataframe again after setting current grades
+    learner_progress_df.sort_values(
+        by=["learner_id", "operation_order", "qset_grade_order"],
+        ascending=[True, True, True],
+        inplace=True,
+    )
+
+    # Determine the starting grade for each learner
+    learner_progress_df["starting_grade"] = learner_progress_df.groupby(
+        ["learner_id", "grade", "operation"], observed=False
+    )["qset_grade"].transform("first")
+
+    # Count the number of learners for each operation and starting grade
+    learner_progress_df["learners_count"] = learner_progress_df.groupby(
+        ["operation", "starting_grade", "grade"], observed=False
+    )["learner_id"].transform("nunique")
+
+    # Create a pivot table to summarize the progress
+    progress_df = pd.pivot_table(
+        learner_progress_df,
+        index=["operation", "starting_grade", "target_grade"],
+        columns=["current_grade"],
+        values=["learner_id", "learners_count"],
+        aggfunc={"learner_id": "nunique", "learners_count": "first"},
+    )
+    progress_df = (
+        round(progress_df["learner_id"] / progress_df["learners_count"], 2) * 100
+    )
+    final_df = progress_df.reset_index()
+
+    # Add % sign to respective qset-grades columns
+    for column in final_df.columns:
+        if column in [
+            "class-one",
+            "class-two",
+            "class-three",
+            "class-four",
+            "class-five",
+            "target-achieved",
+        ]:
+            final_df[column] = final_df[column].apply(
+                lambda x: f"{round(x, 2)} %" if pd.notna(x) else x
+            )
+
+    # Calculate the total number of learners for each operation and starting grade
+    final_df["learners_count"] = (
+        learner_progress_df.groupby(
+            ["operation", "starting_grade", "target_grade"], observed=False
+        )["learner_id"]
+        .agg("nunique")
+        .reset_index()["learner_id"]
+    )
+    final_df["total_count"] = final_df.groupby(["operation", "starting_grade"])[
+        "learners_count"
+    ].transform("sum")
+
+    # Map operation and grade to their order for sorting
+    final_df.loc[:, "operation_order"] = final_df["operation"].map(operations_priority)
+    final_df.loc[:, "starting_grade_order"] = final_df["starting_grade"].map(
+        grades_priority
+    )
+    final_df.loc[:, "target_grade_order"] = final_df["target_grade"].map(
+        grades_priority
+    )
+
+    # Sort the final dataframe
+    final_df.sort_values(
+        by=["operation_order", "starting_grade_order", "target_grade_order"],
+        ascending=[True, True, True],
+        inplace=True,
+    )
+
+    return final_df.to_dict("records")
 
 
 """ FINAL LAYOUT OF THE PAGE """
@@ -272,6 +303,18 @@ grade_color_coding = {
 layout = html.Div(
     [
         html.H1("Learners Progress Dashboard"),
+        # Dropdown for selecting school
+        dcc.Dropdown(
+            id="dig-l-prog-schools-dropdown",
+            options=[
+                {"label": school, "value": school}
+                for school in schools.sort_values(by="school_name")[
+                    "school_name"
+                ].unique()
+            ],
+            placeholder="Select School",
+            style={"width": "300px", "margin": "10px"},
+        ),
         # DataTable to display the filtered data
         dcc.Loading(
             id="dig-l-prog-loading-table",
@@ -292,7 +335,6 @@ layout = html.Div(
                         {"name": "Class Five", "id": "class-five"},
                         {"name": "Target Achieved", "id": "target-achieved"},
                     ],
-                    data=final_df.to_dict("records"),
                     style_table={
                         "overflowX": "auto",
                         "minWidth": "1000px",
