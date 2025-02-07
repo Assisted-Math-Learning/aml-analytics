@@ -14,12 +14,7 @@ connection_string = f"postgresql://{config.DB_USER}:{config.DB_PASSWORD}@{config
 # Create a SQLAlchemy engine for database interaction
 engine = create_engine(connection_string)
 
-# Fetch distinct question set types from the database
-qset_types = pd.read_sql("SELECT DISTINCT(purpose) FROM question_set", engine)
-
-# Fetch grades from the database
-grades = pd.read_sql("SELECT id, cm.name->>'en' AS grade FROM class_master cm", engine)
-
+""" UTILS """
 # Define operation priorities for sorting
 operations_priority = {
     "Addition": 0,
@@ -28,8 +23,23 @@ operations_priority = {
     "Division": 3,
 }
 
-# Map grades to their priorities for sorting
-grades_priority = grades.set_index("grade").to_dict().get("id")
+# Define color coding for operations and grades
+operation_color_coding = {
+    "Addition": "#6dbdd1",
+    "Subtraction": "#8cddfa",
+    "Multiplication": "#ebf3fc",
+    "Division": "#9baef2",
+}
+
+grade_color_coding = {
+    "class-one": "#bfdee3",
+    "class-two": "#d9f3fa",
+    "class-three": "#e6f6fa",
+    "class-four": "#d8e3e6",
+    "class-five": "#f0f4f5",
+}
+
+###################################  Digital Grade Performance Dashboard Logic ###################################
 
 
 @callback(
@@ -42,6 +52,8 @@ def update_table(selected_sheet_type):
         sheet_type_filter = f"AND qs.purpose = '{selected_sheet_type}'"
 
     # Query to fetch detailed question set level data
+    # The query retrieves detailed data on question sets with extreme scores (below 0.2 or above 0.9) for completed learner journeys, optionally filtered by a specific question set type.
+    # It joins data from learner proficiency and question set tables to extract operation, grade, learner ID, question set ID, name, and score.
     qset_level_data_query = f"""
     SELECT lpd.taxonomy->'l1_skill'->'name'->'en' AS operation,
         lpd.taxonomy->'class'->'name'->'en' AS qset_grade,
@@ -57,6 +69,8 @@ def update_table(selected_sheet_type):
     qset_level_data = pd.read_sql(qset_level_data_query, engine)
 
     # Query to fetch aggregated question set level data
+    # The query aggregates question set data for completed learner journeys, calculating the number of attempts, median score, and average score, grouped by operation and grade.
+    # It optionally filters results based on a selected question set type.
     qset_level_agg_query = f"""
     SELECT lpd.taxonomy->'l1_skill'->'name'->'en' AS operation,
         lpd.taxonomy->'class'->'name'->'en' AS qset_grade,
@@ -72,6 +86,7 @@ def update_table(selected_sheet_type):
     qset_level_agg_data = pd.read_sql(qset_level_agg_query, engine)
 
     # Group data based on score thresholds
+    # It groups question set data by operation and grade, aggregating names of question sets with scores below 0.2 and above 0.9 into comma-separated strings.
     qset_data_based_on_score = (
         qset_level_data.groupby(["operation", "qset_grade"])
         .agg(
@@ -119,21 +134,18 @@ def update_table(selected_sheet_type):
     return final_df.to_dict("records")
 
 
-# Define color coding for operations and grades
-operation_color_coding = {
-    "Addition": "#6dbdd1",
-    "Subtraction": "#8cddfa",
-    "Multiplication": "#ebf3fc",
-    "Division": "#9baef2",
-}
+##### DROPDOWNS OPTIONS
+# Fetch distinct question set types from the database
+qset_types = pd.read_sql("SELECT DISTINCT(purpose) FROM question_set", engine)
 
-grade_color_coding = {
-    "class-one": "#bfdee3",
-    "class-two": "#d9f3fa",
-    "class-three": "#e6f6fa",
-    "class-four": "#d8e3e6",
-    "class-five": "#f0f4f5",
-}
+# Fetch grades from the database
+grades = pd.read_sql("SELECT id, cm.name->>'en' AS grade FROM class_master cm", engine)
+
+# Map grades to their priorities for sorting
+grades_priority = grades.set_index("grade").to_dict().get("id")
+
+
+###################################  Digital Grade Performance Dashboard Layout ###################################
 
 # Define the layout of the Dash app
 layout = html.Div(
@@ -238,7 +250,3 @@ layout = html.Div(
         ),
     ]
 )
-
-
-# if __name__ == "__main__":
-#     app.run_server(debug=True)

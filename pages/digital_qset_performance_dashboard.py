@@ -13,31 +13,22 @@ dash.register_page(__name__)
 connection_string = f"postgresql://{config.DB_USER}:{config.DB_PASSWORD}@{config.DB_HOST}:{config.DB_PORT}/{config.DB_NAME}"
 engine = create_engine(connection_string)
 
-# Fetch distinct Qset types from the database
-qset_types = pd.read_sql("SELECT DISTINCT(purpose) FROM question_set", engine)
+""" UTILS """
+# Define color coding for operations and grades
+operation_color_coding = {
+    "Addition": "#6dbdd1",
+    "Subtraction": "#8cddfa",
+    "Multiplication": "#ebf3fc",
+    "Division": "#9baef2",
+}
 
-# Define operation types
-operations = ["Addition", "Subtraction", "Multiplication", "Division"]
-
-# Fetch distinct question set identifiers
-question_set_ids = pd.read_sql(
-    "SELECT DISTINCT(identifier) AS qset_id FROM question_set", engine
-)
-
-# Fetch distinct L2 skill types
-l2_skills = pd.read_sql(
-    "SELECT DISTINCT(taxonomy->'l2_skill'->0->'name'->>'en') AS l2_skill FROM question_set",
-    engine,
-)
-
-# Fetch distinct L3 skill types
-l3_skills = pd.read_sql(
-    "SELECT DISTINCT(taxonomy->'l3_skill'->0->'name'->>'en') AS l3_skill FROM question_set",
-    engine,
-)
-
-# Fetch grades from the database
-grades = pd.read_sql("SELECT id, cm.name->>'en' AS grade FROM class_master cm", engine)
+grade_color_coding = {
+    "class-one": "#bfdee3",
+    "class-two": "#d9f3fa",
+    "class-three": "#e6f6fa",
+    "class-four": "#d8e3e6",
+    "class-five": "#f0f4f5",
+}
 
 # Define operation priorities for sorting
 operations_priority = {
@@ -47,8 +38,78 @@ operations_priority = {
     "Division": 3,
 }
 
-# Map grades to their priorities for sorting
-grades_priority = grades.set_index("grade").to_dict().get("id")
+# Define operation types
+operations = ["Addition", "Subtraction", "Multiplication", "Division"]
+
+
+###################################  Digital QSet Performance Dashboard Logic ###################################
+
+
+def get_question_set_data(
+    selected_qsets,
+    selected_operation,
+    selected_l2_skill,
+    selected_l3_skill,
+    selected_sheet_type,
+):
+    # Base query to fetch question set data
+    question_set_dt_query = f"""
+    SELECT qs.identifier AS question_set_id,
+        qs.x_id AS question_set_uid,
+        lpd.learner_id AS learner_id,
+        qs.taxonomy->'l1_skill'->'name'->>'en' AS operation,
+        qs.taxonomy->'class'->'name'->>'en' AS qset_grade,
+        qs.sequence AS sequence,
+        qs.purpose AS purpose,
+        qs.title->>'en' AS qset_name,
+        qs.taxonomy->'l2_skill'->0->'name'->>'en' AS l2_skill,
+        qs.taxonomy->'l3_skill'->0->'name'->>'en' AS l3_skill,
+        lpd.score AS score,
+        lpd.updated_at,
+        DATE(lpd.updated_at) AS updated_date
+    FROM learner_journey lj
+    LEFT JOIN learner_proficiency_question_level_data lpd ON lj.question_set_id = lpd.question_set_id AND lj.learner_id = lpd.learner_id
+    LEFT JOIN question_set qs ON qs.identifier = lj.question_set_id
+    """
+
+    # List to hold query conditions
+    conditions = []
+
+    # Add condition for completed status
+    status_query = "lj.status='completed'"
+    conditions.append(status_query)
+
+    # Add conditions based on selected filters
+    if selected_qsets:
+        qsets_query = "qs.x_id IN ({})".format(
+            ", ".join(f"'{qset_name}'" for qset_name in selected_qsets)
+        )
+        conditions.append(qsets_query)
+
+    if selected_operation:
+        conditions.append(
+            "qs.taxonomy->'l1_skill'->'name'->>'en' = '{}'".format(selected_operation)
+        )
+
+    if selected_l2_skill:
+        conditions.append(
+            "qs.taxonomy->'l2_skill'->0->'name'->>'en' = '{}'".format(selected_l2_skill)
+        )
+
+    if selected_l3_skill:
+        conditions.append(
+            "qs.taxonomy->'l3_skill'->0->'name'->>'en' = '{}'".format(selected_l3_skill)
+        )
+
+    if selected_sheet_type:
+        conditions.append("qs.purpose = '{}'".format(selected_sheet_type))
+
+    # Append conditions to the query
+    question_set_dt_query += " WHERE " + " AND ".join(conditions)
+
+    # Execute the query and fetch data
+    question_set_data = pd.read_sql(question_set_dt_query, engine)
+    return question_set_data
 
 
 @callback(
@@ -77,72 +138,26 @@ def update_table(
     ):
         return pd.DataFrame([]).to_dict("records")
 
-    # Base query to fetch question set data
-    question_set_dt_query = f"""
-    SELECT qs.identifier AS question_set_id,
-        lpd.learner_id AS learner_id,
-        qs.taxonomy->'l1_skill'->'name'->>'en' AS operation,
-        qs.taxonomy->'class'->'name'->>'en' AS qset_grade,
-        qs.sequence AS sequence,
-        qs.purpose AS purpose,
-        qs.title->>'en' AS qset_name,
-        qs.taxonomy->'l2_skill'->0->'name'->>'en' AS l2_skill,
-        qs.taxonomy->'l3_skill'->0->'name'->>'en' AS l3_skill,
-        lpd.score AS score,
-        lpd.updated_at,
-        DATE(lpd.updated_at) AS updated_date
-    FROM learner_journey lj
-    LEFT JOIN learner_proficiency_question_level_data lpd ON lj.question_set_id = lpd.question_set_id AND lj.learner_id = lpd.learner_id
-    LEFT JOIN question_set qs ON qs.identifier = lj.question_set_id
-    """
-
-    # List to hold query conditions
-    conditions = []
-
-    # Add condition for completed status
-    status_query = "lj.status='completed'"
-    conditions.append(status_query)
-
-    # Add conditions based on selected filters
-    if selected_qsets:
-        qsets_query = "qs.identifier IN ({})".format(
-            ", ".join(f"'{qset_name}'" for qset_name in selected_qsets)
-        )
-        conditions.append(qsets_query)
-
-    if selected_operation:
-        conditions.append(
-            "qs.taxonomy->'l1_skill'->'name'->>'en' = '{}'".format(selected_operation)
-        )
-
-    if selected_l2_skill:
-        conditions.append(
-            "qs.taxonomy->'l2_skill'->0->'name'->>'en' = '{}'".format(selected_l2_skill)
-        )
-
-    if selected_l3_skill:
-        conditions.append(
-            "qs.taxonomy->'l3_skill'->0->'name'->>'en' = '{}'".format(selected_l3_skill)
-        )
-
-    if selected_sheet_type:
-        conditions.append("qs.purpose = '{}'".format(selected_sheet_type))
-
-    # Append conditions to the query
-    question_set_dt_query += " WHERE " + " AND ".join(conditions)
-
-    # Execute the query and fetch data
-    question_set_data = pd.read_sql(question_set_dt_query, engine)
+    # The query retrieves detailed question set data for completed learner journeys, filtering by selected question sets, operations, skills, and sheet type.
+    # It constructs conditions dynamically based on user selections and executes the query to fetch the filtered data.
+    question_set_data = get_question_set_data(
+        selected_qsets,
+        selected_operation,
+        selected_l2_skill,
+        selected_l3_skill,
+        selected_sheet_type,
+    )
 
     # Return empty data if no results are found
     if question_set_data.empty:
         return pd.DataFrame([]).to_dict("records")
 
-    # Group data by learner and calculate time differences and scores
+    # Group data by learner and calculate time spent on and marks scored in respective qsets on each date
     question_set_data_per_learner = (
         question_set_data.groupby(
             [
                 "question_set_id",
+                "question_set_uid",
                 "learner_id",
                 "operation",
                 "qset_grade",
@@ -169,11 +184,12 @@ def update_table(
         - question_set_data_per_learner["min_timestamp"]
     ).dt.total_seconds()
 
-    # Aggregate data per learner
+    # Aggregate total time taken, total marks scored and total questions attempted of every qset attempted by learners
     final_question_set_data_per_learner = (
         question_set_data_per_learner.groupby(
             [
                 "question_set_id",
+                "question_set_uid",
                 "learner_id",
                 "operation",
                 "qset_grade",
@@ -192,17 +208,23 @@ def update_table(
         .reset_index()
     )
 
-    # Calculate accuracy
+    # Calculate accuracy of every qset attempted by each learner
     final_question_set_data_per_learner["accuracy"] = (
         final_question_set_data_per_learner["total_score"]
         / final_question_set_data_per_learner["total_count"]
     )
 
-    # Aggregate data for final display
+    # Aggregate following metrics of every qset:
+    # 1. Count of learners attempted that qset
+    # 2. Median accuracy of all learners in that qset
+    # 3. Average accuracy in that qset
+    # 4. Median time taken by learners to complete that qset
+    # 5. Average time taken by learners to complete that qset
     final_df = (
         final_question_set_data_per_learner.groupby(
             [
                 "question_set_id",
+                "question_set_uid",
                 "operation",
                 "qset_grade",
                 "sequence",
@@ -251,21 +273,34 @@ def update_table(
     return final_df.to_dict("records")
 
 
-# Define color coding for operations and grades
-operation_color_coding = {
-    "Addition": "#6dbdd1",
-    "Subtraction": "#8cddfa",
-    "Multiplication": "#ebf3fc",
-    "Division": "#9baef2",
-}
+##### DROPDOWNS OPTIONS
+# Fetch distinct Qset types from the database
+qset_types = pd.read_sql("SELECT DISTINCT(purpose) FROM question_set", engine)
 
-grade_color_coding = {
-    "class-one": "#bfdee3",
-    "class-two": "#d9f3fa",
-    "class-three": "#e6f6fa",
-    "class-four": "#d8e3e6",
-    "class-five": "#f0f4f5",
-}
+# Fetch distinct question set identifiers
+question_set_ids = pd.read_sql(
+    "SELECT DISTINCT(x_id) AS qset_id FROM question_set", engine
+)
+
+# Fetch distinct L2 skill types
+l2_skills = pd.read_sql(
+    "SELECT DISTINCT(taxonomy->'l2_skill'->0->'name'->>'en') AS l2_skill FROM question_set",
+    engine,
+)
+
+# Fetch distinct L3 skill types
+l3_skills = pd.read_sql(
+    "SELECT DISTINCT(taxonomy->'l3_skill'->0->'name'->>'en') AS l3_skill FROM question_set",
+    engine,
+)
+
+# Fetch grades from the database
+grades = pd.read_sql("SELECT id, cm.name->>'en' AS grade FROM class_master cm", engine)
+
+# Map grades to their priorities for sorting
+grades_priority = grades.set_index("grade").to_dict().get("id")
+
+###################################  Digital QSet Performance Dashboard Layout ###################################
 
 # Define the layout of the Dash app
 layout = html.Div(
@@ -286,7 +321,6 @@ layout = html.Div(
                     multi=True,
                     placeholder="Select Question Set ID",
                     style={"width": "300px", "margin": "10px"},
-                    optionHeight=55,
                 ),
                 # Dropdown for selecting operations
                 dcc.Dropdown(
@@ -355,7 +389,7 @@ layout = html.Div(
                     columns=[
                         {"name": "Operation", "id": "operation"},
                         {"name": "Class", "id": "qset_grade"},
-                        {"name": "Question Set ID", "id": "question_set_id"},
+                        {"name": "Question Set UID", "id": "question_set_uid"},
                         {"name": "Question Set Sequence", "id": "sequence"},
                         {"name": "Question Set Type", "id": "purpose"},
                         {"name": "Question Set Name", "id": "qset_name"},
@@ -426,6 +460,3 @@ layout = html.Div(
         ),
     ]
 )
-
-# if __name__ == "__main__":
-#     app.run_server(debug=True)

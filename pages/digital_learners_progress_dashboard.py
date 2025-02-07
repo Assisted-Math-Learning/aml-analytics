@@ -15,6 +15,31 @@ connection_string = f"postgresql://{config.DB_USER}:{config.DB_PASSWORD}@{config
 # Create a SQLAlchemy engine
 engine = create_engine(connection_string)
 
+""" UTILS """
+# Define color coding for operations and grades
+operation_color_coding = {
+    "Addition": "#6dbdd1",
+    "Subtraction": "#8cddfa",
+    "Multiplication": "#ebf3fc",
+    "Division": "#9baef2",
+}
+
+grade_color_coding = {
+    "class-one": "#bfdee3",
+    "class-two": "#d9f3fa",
+    "class-three": "#e6f6fa",
+    "class-four": "#d8e3e6",
+    "class-five": "#f0f4f5",
+}
+
+# Define operation priorities
+operations_priority = {
+    "Addition": 0,
+    "Subtraction": 1,
+    "Multiplication": 2,
+    "Division": 3,
+}
+
 # Fetch grades from the database
 grades = pd.read_sql("SELECT id, cm.name->>'en' AS grade FROM class_master cm", engine)
 
@@ -23,6 +48,57 @@ schools = pd.read_sql("SELECT name as school_name FROM school", engine)
 schools = pd.concat(
     [schools, pd.DataFrame({"school_name": ["No School"]})], ignore_index=True
 )
+# Map grades to their priorities
+grades_priority = grades.set_index("grade").to_dict().get("id")
+
+
+# Function to set the current grade for each learner
+# The current_grade is determined by evaluating the learner's progress through sorted question sets,
+# checking if they have reached their target grade or need to progress to the next grade.
+# If the learner's target_grade matches the qset_grade, current_grade is set to "target-achieved".
+# Otherwise, it progresses to the next grade in sequence if conditions are met, or remains the same.
+def set_curr_grade(group):
+    # Sort the group by operation and grade order
+    group.sort_values(
+        by=["operation_order", "qset_grade_order"], ascending=[True, True], inplace=True
+    )
+    # Get the last record of the group
+    last_record = group.iloc[-1]
+    target_grade = last_record["target_grade"]
+    qset_grade = last_record["qset_grade"]
+    next_grade = last_record["next_grade"]
+    curr_grade = qset_grade
+
+    # Check if this is the last record for the learner or has next_grade
+    if last_record["is_last"] == True or not pd.isna(next_grade):
+        # Check if the target_grade and qset_grade match
+        if target_grade == qset_grade:
+            curr_grade = "target-achieved"
+        elif qset_grade == "class-one":
+            curr_grade = "class-two"
+        elif qset_grade == "class-two":
+            curr_grade = "class-three"
+        elif qset_grade == "class-three":
+            curr_grade = "class-four"
+        elif qset_grade == "class-four":
+            curr_grade = "class-five"
+        elif qset_grade == "class-five":
+            curr_grade = "class-six"
+
+    group["current_grade"] = curr_grade
+    return group
+
+
+# Map current grades to target grades
+target_grade_map = {
+    "class-two": "class-one",
+    "class-three": "class-two",
+    "class-four": "class-three",
+    "class-five": "class-four",
+    "class-six": "class-five",
+}
+
+###################################  Digital Learner Progress Dashboard Logic ###################################
 
 # Fetch all learners' data for non-diagnostic sheets
 all_learners_data = pd.read_sql(
@@ -82,18 +158,9 @@ last_question_per_qset_grade = pd.read_sql(
     engine,
 )
 
-# Define operation priorities
-operations_priority = {
-    "Addition": 0,
-    "Subtraction": 1,
-    "Multiplication": 2,
-    "Division": 3,
-}
-
-# Map grades to their priorities
-grades_priority = grades.set_index("grade").to_dict().get("id")
-
-# Merge learners' data with the last question data
+# Map question set last question to learners attempt data
+# It is done to know whether the learner has attempted the last question of that qset or not.
+# Based, on that the learner we'll be able to know that whether the learner has solved the last qset of that qset grade or not.
 learner_progress_data = pd.merge(
     all_learners_data,
     last_question_per_qset_grade,
@@ -138,7 +205,7 @@ def update_table(selected_school):
         "qset_grade"
     ].map(grades_priority)
 
-    # Sort the dataframe by learner, operation, and qset_grade order
+    # Sort the dataframe by learner, operation, and qset_grade order before mapping the next qset_grade on each record
     learner_progress_df.sort_values(
         by=["learner_id", "operation_order", "qset_grade_order"],
         ascending=[True, True, True],
@@ -214,6 +281,7 @@ def update_table(selected_school):
     )
 
     # Determine the starting grade for each learner
+    # Starting grade is the first qset-grade in that operation with which the learner began their journey.
     learner_progress_df["starting_grade"] = learner_progress_df.groupby(
         ["learner_id", "grade", "operation"], observed=False
     )["qset_grade"].transform("first")
@@ -277,7 +345,6 @@ def update_table(selected_school):
         ascending=[True, True, True],
         inplace=True,
     )
-
     return final_df.to_dict("records")
 
 
@@ -395,6 +462,3 @@ layout = html.Div(
         ),
     ]
 )
-
-# if __name__ == "__main__":
-#     app.run_server(debug=True)
