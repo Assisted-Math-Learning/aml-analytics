@@ -43,13 +43,20 @@ grade_color_coding = {
 
 
 @callback(
-    Output("dig-qgp-data-table", "data"), Input("dig-qgp-qset-types-dropdown", "value")
+    Output("dig-qgp-data-table", "data"),
+    Input("dig-qgp-qset-types-dropdown", "value"),
+    Input("dig-qgp-repo-dropdown", "value"),
 )
-def update_table(selected_sheet_type):
+def update_table(selected_sheet_type, selected_repo):
     # Filter query based on selected question set type
     sheet_type_filter = ""
     if selected_sheet_type:
         sheet_type_filter = f"AND qs.purpose = '{selected_sheet_type}'"
+
+    # Filter query based on selected repository
+    repo_filter = ""
+    if selected_repo:
+        repo_filter = f"AND repo.name->>'en' = '{selected_repo}'"
 
     # Query to fetch detailed question set level data
     # The query retrieves detailed data on question sets with extreme scores (below 0.2 or above 0.9) for completed learner journeys, optionally filtered by a specific question set type.
@@ -57,14 +64,15 @@ def update_table(selected_sheet_type):
     qset_level_data_query = f"""
     SELECT lpd.taxonomy->'l1_skill'->'name'->'en' AS operation,
         lpd.taxonomy->'class'->'name'->'en' AS qset_grade,
-        lpd.learner_id,
         lpd.question_set_id,
         qs.title->'en' AS qset_name,
-        lpd.score
+        avg(lpd.score) AS avg_score
     FROM learner_journey lj
     LEFT JOIN learner_proficiency_question_set_level_data lpd ON lj.question_set_id = lpd.question_set_id AND lj.learner_id = lpd.learner_id
     LEFT JOIN question_set qs ON qs.identifier = lj.question_set_id
-    WHERE lj.status='completed' AND ( lpd.score < 0.2 OR lpd.score > 0.9 ) {sheet_type_filter}
+    LEFT JOIN repository repo ON repo.identifier = qs.repository->>'identifier'
+    WHERE lj.status='completed' {sheet_type_filter} {repo_filter}
+    GROUP BY lpd.taxonomy->'l1_skill'->'name'->'en', lpd.taxonomy->'class'->'name'->'en', lpd.question_set_id, qs.title->'en'
     """
     qset_level_data = pd.read_sql(qset_level_data_query, engine)
 
@@ -80,7 +88,8 @@ def update_table(selected_sheet_type):
     FROM learner_journey lj
     LEFT JOIN learner_proficiency_question_set_level_data lpd ON lj.question_set_id = lpd.question_set_id AND lj.learner_id = lpd.learner_id
     LEFT JOIN question_set qs ON qs.identifier = lj.question_set_id
-    WHERE lj.status='completed' {sheet_type_filter}
+    LEFT JOIN repository repo ON repo.identifier = qs.repository->>'identifier'
+    WHERE lj.status='completed' {sheet_type_filter} {repo_filter}
     GROUP BY lpd.taxonomy->'l1_skill'->'name'->'en', lpd.taxonomy->'class'->'name'->'en'
     """
     qset_level_agg_data = pd.read_sql(qset_level_agg_query, engine)
@@ -93,13 +102,19 @@ def update_table(selected_sheet_type):
             qsets_score_less_than_20=(
                 "qset_name",
                 lambda x: ", \n".join(
-                    map(str, x[qset_level_data["score"] < 0.2].sort_values().unique())
+                    map(
+                        str,
+                        x[qset_level_data["avg_score"] < 0.2].sort_values().unique(),
+                    )
                 ),
             ),
             qsets_score_more_than_90=(
                 "qset_name",
                 lambda x: ", \n".join(
-                    map(str, x[qset_level_data["score"] > 0.9].sort_values().unique())
+                    map(
+                        str,
+                        x[qset_level_data["avg_score"] > 0.9].sort_values().unique(),
+                    )
                 ),
             ),
         )
@@ -135,6 +150,15 @@ def update_table(selected_sheet_type):
 
 
 ##### DROPDOWNS OPTIONS
+# Fetch distinct repository names from the database
+repository_options = pd.read_sql(
+    "SELECT DISTINCT(name->>'en') AS repo_name FROM repository",
+    engine,
+)
+repo_names_sorted = repository_options.sort_values(by="repo_name")[
+    "repo_name"
+].drop_duplicates()
+
 # Fetch distinct question set types from the database
 qset_types = pd.read_sql("SELECT DISTINCT(purpose) FROM question_set", engine)
 
@@ -151,15 +175,35 @@ grades_priority = grades.set_index("grade").to_dict().get("id")
 layout = html.Div(
     [
         html.H1("Question-Set Grade Level Performance Dashboard"),
-        # Dropdown for selecting the question set type
-        dcc.Dropdown(
-            id="dig-qgp-qset-types-dropdown",
-            options=[
-                {"label": qset_type, "value": qset_type}
-                for qset_type in qset_types["purpose"].sort_values().unique()
+        html.Div(
+            [
+                # Dropdown for selecting repository name
+                dcc.Dropdown(
+                    id="dig-qgp-repo-dropdown",
+                    options=[
+                        {"label": repo, "value": repo} for repo in repo_names_sorted
+                    ],
+                    placeholder="Select Repository",
+                    style={"width": "300px", "margin": "10px"},
+                ),
+                # Dropdown for selecting the question set type
+                dcc.Dropdown(
+                    id="dig-qgp-qset-types-dropdown",
+                    options=[
+                        {"label": qset_type, "value": qset_type}
+                        for qset_type in qset_types["purpose"].sort_values().unique()
+                    ],
+                    placeholder="Select Question Set Type",
+                    style={"width": "300px", "margin": "10px"},
+                ),
             ],
-            placeholder="Select Question Set Type",
-            style={"width": "300px", "margin": "10px"},
+            style={
+                "display": "flex",
+                "justifyContent": "flex-start",  # Center items horizontally
+                "alignItems": "center",  # Align items vertically
+                "flexWrap": "wrap",  # Allow items to wrap to the next line if needed
+                "marginBottom": "10px",
+            },
         ),
         dcc.Loading(
             id="dig-qgp-loading-table",

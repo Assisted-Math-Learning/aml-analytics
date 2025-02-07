@@ -120,11 +120,39 @@ def update_table(selected_qset):
 
 
 ##### DROPDOWNS OPTIONS
-# Fetch distinct question set IDs from the database
-question_set_ids = pd.read_sql(
-    "SELECT DISTINCT(x_id) AS qset_id FROM question_set",
+# Fetch distinct repository names from the database
+repository_options = pd.read_sql(
+    "SELECT DISTINCT(name->>'en') AS repo_name FROM repository",
     engine,
 )
+repo_names_sorted = repository_options.sort_values(by="repo_name")[
+    "repo_name"
+].drop_duplicates()
+
+
+def get_all_question_sets(repository_name):
+    # Fetch distinct question set IDs from the database
+    query = f"SELECT DISTINCT(qs.x_id) AS qset_id FROM question_set qs LEFT JOIN repository repo ON repo.identifier = qs.repository->>'identifier'"
+
+    # Add condition for repository name if provided
+    if repository_name:
+        query += f" WHERE repo.name->>'en'='{repository_name}'"
+
+    question_set_ids = pd.read_sql(query, engine)
+    return question_set_ids["qset_id"].sort_values().unique()
+
+
+@callback(
+    Output("dig-qlp-qset-dropdown", "options"),
+    Input("dig-qlp-repo-dropdown", "value"),
+)
+def update_qset_options(selected_repo):
+    # Fetch all question set IDs for the selected repository
+    question_set_ids = get_all_question_sets(selected_repo)
+
+    # Return a list of dictionaries with question set IDs and names
+    return [{"label": qset_id, "value": qset_id} for qset_id in question_set_ids]
+
 
 ###################################  Digital Question Performance Dashboard Layout ###################################
 
@@ -134,16 +162,18 @@ layout = html.Div(
         html.H1("Question Level Performance Dashboard"),
         html.Div(
             [
+                # Dropdown for selecting repository name
+                dcc.Dropdown(
+                    id="dig-qlp-repo-dropdown",
+                    options=[
+                        {"label": repo, "value": repo} for repo in repo_names_sorted
+                    ],
+                    placeholder="Select Repository",
+                    style={"width": "300px", "margin": "10px"},
+                ),
                 # Dropdown for selecting question set ID
                 dcc.Dropdown(
                     id="dig-qlp-qset-dropdown",
-                    options=[
-                        {"label": qset_id, "value": qset_id}
-                        for qset_id in question_set_ids["qset_id"]
-                        .sort_values()
-                        .unique()
-                        if qset_id
-                    ],
                     placeholder="Select Question Set ID",
                     style={"width": "300px", "margin": "10px"},
                 ),

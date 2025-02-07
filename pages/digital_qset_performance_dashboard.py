@@ -46,6 +46,7 @@ operations = ["Addition", "Subtraction", "Multiplication", "Division"]
 
 
 def get_question_set_data(
+    selected_repo,
     selected_qsets,
     selected_operation,
     selected_l2_skill,
@@ -70,6 +71,7 @@ def get_question_set_data(
     FROM learner_journey lj
     LEFT JOIN learner_proficiency_question_level_data lpd ON lj.question_set_id = lpd.question_set_id AND lj.learner_id = lpd.learner_id
     LEFT JOIN question_set qs ON qs.identifier = lj.question_set_id
+    LEFT JOIN repository repo ON repo.identifier = qs.repository->>'identifier'
     """
 
     # List to hold query conditions
@@ -80,6 +82,9 @@ def get_question_set_data(
     conditions.append(status_query)
 
     # Add conditions based on selected filters
+    if selected_repo:
+        conditions.append(f"repo.name->>'en' = '{selected_repo}'")
+
     if selected_qsets:
         qsets_query = "qs.x_id IN ({})".format(
             ", ".join(f"'{qset_name}'" for qset_name in selected_qsets)
@@ -114,6 +119,7 @@ def get_question_set_data(
 
 @callback(
     Output("dig-qsp-data-table", "data"),
+    Input("dig-qsp-repo-dropdown", "value"),
     Input("dig-qsp-qset-dropdown", "value"),
     Input("dig-qsp-operations-dropdown", "value"),
     Input("dig-qsp-l2-skill-dropdown", "value"),
@@ -122,6 +128,7 @@ def get_question_set_data(
     prevent_initial_call=True,
 )
 def update_table(
+    selected_repo,
     selected_qsets,
     selected_operation,
     selected_l2_skill,
@@ -130,7 +137,8 @@ def update_table(
 ):
     # Return empty data if no filters are selected
     if (
-        (not selected_qsets)
+        (not selected_repo)
+        and (not selected_qsets)
         and (not selected_l3_skill)
         and (not selected_l2_skill)
         and (not selected_operation)
@@ -141,6 +149,7 @@ def update_table(
     # The query retrieves detailed question set data for completed learner journeys, filtering by selected question sets, operations, skills, and sheet type.
     # It constructs conditions dynamically based on user selections and executes the query to fetch the filtered data.
     question_set_data = get_question_set_data(
+        selected_repo,
         selected_qsets,
         selected_operation,
         selected_l2_skill,
@@ -277,10 +286,39 @@ def update_table(
 # Fetch distinct Qset types from the database
 qset_types = pd.read_sql("SELECT DISTINCT(purpose) FROM question_set", engine)
 
-# Fetch distinct question set identifiers
-question_set_ids = pd.read_sql(
-    "SELECT DISTINCT(x_id) AS qset_id FROM question_set", engine
+# Fetch distinct repository names from the database
+repository_options = pd.read_sql(
+    "SELECT DISTINCT(name->>'en') AS repo_name FROM repository",
+    engine,
 )
+repo_names_sorted = repository_options.sort_values(by="repo_name")[
+    "repo_name"
+].drop_duplicates()
+
+
+def get_all_question_sets(repository_name):
+    # Fetch distinct question set IDs from the database
+    query = f"SELECT DISTINCT(qs.x_id) AS qset_id FROM question_set qs LEFT JOIN repository repo ON repo.identifier = qs.repository->>'identifier'"
+
+    # Add condition for repository name if provided
+    if repository_name:
+        query += f" WHERE repo.name->>'en'='{repository_name}'"
+
+    question_set_ids = pd.read_sql(query, engine)
+    return question_set_ids["qset_id"].sort_values().unique()
+
+
+@callback(
+    Output("dig-qsp-qset-dropdown", "options"),
+    Input("dig-qsp-repo-dropdown", "value"),
+)
+def update_qset_options(selected_repo):
+    # Fetch all question set IDs for the selected repository
+    question_set_ids = get_all_question_sets(selected_repo)
+
+    # Return a list of dictionaries with question set IDs and names
+    return [{"label": qset_id, "value": qset_id} for qset_id in question_set_ids]
+
 
 # Fetch distinct L2 skill types
 l2_skills = pd.read_sql(
@@ -308,16 +346,18 @@ layout = html.Div(
         html.H1("Question-Set Level Performance Dashboard"),
         html.Div(
             [
+                # Dropdown for selecting repository name
+                dcc.Dropdown(
+                    id="dig-qsp-repo-dropdown",
+                    options=[
+                        {"label": repo, "value": repo} for repo in repo_names_sorted
+                    ],
+                    placeholder="Select Repository",
+                    style={"width": "300px", "margin": "10px"},
+                ),
                 # Dropdown for selecting question set IDs
                 dcc.Dropdown(
                     id="dig-qsp-qset-dropdown",
-                    options=[
-                        {"label": qset_id, "value": qset_id}
-                        for qset_id in question_set_ids["qset_id"]
-                        .sort_values()
-                        .unique()
-                        if qset_id
-                    ],
                     multi=True,
                     placeholder="Select Question Set ID",
                     style={"width": "300px", "margin": "10px"},
