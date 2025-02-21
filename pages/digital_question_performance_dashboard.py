@@ -1,62 +1,50 @@
-import config
 import dash
 import pandas as pd
 
-from dash import Dash, Input, Output, State, callback, dash_table, dcc, html, no_update
-from sqlalchemy import create_engine
+from dash import Dash, Input, Output, callback, dash_table, dcc, html
+
+from db_utils import (
+    ALL_REPOSITORY_NAMES_KEY,
+    get_all_question_sets,
+    get_data,
+    get_question_level_data,
+)
 
 
 # Register the page with Dash
 dash.register_page(__name__)
 
-# Create the connection string for the database
-connection_string = f"postgresql://{config.DB_USER}:{config.DB_PASSWORD}@{config.DB_HOST}:{config.DB_PORT}/{config.DB_NAME}"
-# Create a SQLAlchemy engine for database interaction
-engine = create_engine(connection_string)
 
 ###################################  Digital Question Performance Dashboard Logic ###################################
 
 
 @callback(
     Output("dig-qlp-data-table", "data"),
+    Output("dig-qlp-repo-dropdown", "options"),
     Input("dig-qlp-qset-dropdown", "value"),
-    prevent_initial_call=True,
 )
 def update_table(selected_qset):
+    # Repository dropdown options
+    repo_options = [
+        {"label": repo, "value": repo} for repo in get_data(ALL_REPOSITORY_NAMES_KEY)
+    ]
+
     # Return an empty DataFrame if no question set is selected
     if not selected_qset:
-        return pd.DataFrame([]).to_dict("records")
+        return pd.DataFrame([]).to_dict("records"), repo_options
 
     # SQL query to fetch question level data for the selected question set
     # The query fetches detailed question-level data for a specific question set identified by selected_qset,
     # including question set and question identifiers, sequences, learner IDs, scores, and update timestamps.
     # It joins data from learner proficiency, question set mappings, question sets, and questions to provide a comprehensive view of each question's performance.
     # This allows for analysis of individual question performance within the selected question set.
-    question_level_dt_query = f"""
-    SELECT
-        lpd.question_set_id,
-        qs.x_id AS question_set_uid,
-        qs.sequence qs_seq,
-        lpd.question_id,
-        ques.x_id AS question_uid,
-        qsqm.sequence q_seq,
-        lpd.learner_id,
-        lpd.score,
-        lpd.updated_at,
-        DATE(lpd.updated_at) AS updated_date
-    FROM learner_proficiency_question_level_data lpd
-    LEFT JOIN question_set_question_mapping qsqm ON qsqm.question_set_id=lpd.question_set_id AND qsqm.question_id=lpd.question_id
-    LEFT JOIN question_set qs ON qs.identifier=lpd.question_set_id
-    LEFT JOIN question ques ON ques.identifier=lpd.question_id
-    WHERE qs.x_id='{selected_qset}'
-    """
 
     # Execute the query and store the result in a DataFrame
-    question_level_data = pd.read_sql(question_level_dt_query, engine)
+    question_level_data = get_question_level_data(selected_qset)
 
     # Return an empty DataFrame if no data is found
     if question_level_data.empty:
-        return pd.DataFrame([]).to_dict("records")
+        return pd.DataFrame([]).to_dict("records"), repo_options
 
     # Sort data by question set ID, learner ID, and question sequence
     question_level_data.sort_values(
@@ -116,30 +104,7 @@ def update_table(selected_qset):
     )
 
     # Return the final DataFrame as a dictionary
-    return final_df.to_dict("records")
-
-
-##### DROPDOWNS OPTIONS
-# Fetch distinct repository names from the database
-repository_options = pd.read_sql(
-    "SELECT DISTINCT(name->>'en') AS repo_name FROM repository",
-    engine,
-)
-repo_names_sorted = repository_options.sort_values(by="repo_name")[
-    "repo_name"
-].drop_duplicates()
-
-
-def get_all_question_sets(repository_name):
-    # Fetch distinct question set IDs from the database
-    query = f"SELECT DISTINCT(qs.x_id) AS qset_id FROM question_set qs LEFT JOIN repository repo ON repo.identifier = qs.repository->>'identifier'"
-
-    # Add condition for repository name if provided
-    if repository_name:
-        query += f" WHERE repo.name->>'en'='{repository_name}'"
-
-    question_set_ids = pd.read_sql(query, engine)
-    return question_set_ids["qset_id"].sort_values().unique()
+    return final_df.to_dict("records"), repo_options
 
 
 @callback(
@@ -165,9 +130,6 @@ layout = html.Div(
                 # Dropdown for selecting repository name
                 dcc.Dropdown(
                     id="dig-qlp-repo-dropdown",
-                    options=[
-                        {"label": repo, "value": repo} for repo in repo_names_sorted
-                    ],
                     placeholder="Select Repository",
                     style={"width": "300px", "margin": "10px"},
                 ),

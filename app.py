@@ -1,5 +1,7 @@
 import dash
 from dash import Dash, html, dcc
+import config
+import redis
 
 app = Dash(__name__, use_pages=True, suppress_callback_exceptions=True)
 server = app.server

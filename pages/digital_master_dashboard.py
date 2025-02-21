@@ -1,11 +1,21 @@
-import config
 import dash
+from db_utils import (
+    ALL_GRADES_KEY,
+    ALL_LEARNER_DATA_KEY,
+    ALL_LEARNERS_KEY,
+    ALL_QSET_TYPES_KEY,
+    ALL_SCHOOLS_KEY,
+    get_data,
+    get_min_max_timestamp,
+    get_question_sequence_data,
+    last_synced_time,
+)
 import numpy as np
 import pandas as pd
+import pytz
 import re
 from dash import Dash, Input, Output, State, callback, dash_table, dcc, html, no_update
 from datetime import datetime, timedelta
-from sqlalchemy import create_engine
 
 # Register the page
 # app = Dash(__name__)
@@ -13,12 +23,9 @@ from sqlalchemy import create_engine
 dash.register_page(__name__)
 
 
-# Create the connection string for the database
-connection_string = f"postgresql://{config.DB_USER}:{config.DB_PASSWORD}@{config.DB_HOST}:{config.DB_PORT}/{config.DB_NAME}"
-# Create a SQLAlchemy engine
-engine = create_engine(connection_string)
-
 """ UTILS """
+# Define IST timezone
+IST = pytz.timezone("Asia/Kolkata")
 
 
 # Function to check the format of columns as week-range column
@@ -68,31 +75,12 @@ def calculate_range(date):
     return f"{week_start.strftime('%Y-%m-%d')},{week_end.strftime('%Y-%m-%d')}"
 
 
-# Minimum - Maximum Date
-min_max_date = pd.read_sql(
-    "SELECT MIN(updated_at), MAX(updated_at) FROM learner_proficiency_question_level_data",
-    engine,
-)
 operations_priority = {
     "Addition": 0,
     "Subtraction": 1,
     "Multiplication": 2,
     "Division": 3,
 }
-
-# Grades List
-grades = pd.read_sql("SELECT id, cm.name->>'en' AS grade FROM class_master cm", engine)
-grades_priority = grades.set_index("grade").to_dict().get("id")
-
-
-# Schools List
-schools = pd.read_sql("SELECT name as school_name FROM school", engine)
-schools = pd.concat(
-    [schools, pd.DataFrame({"school_name": ["No School"]})], ignore_index=True
-)
-
-# Qset Types
-qset_types = pd.read_sql("SELECT DISTINCT(purpose) FROM question_set", engine)
 
 
 # Define the logic for applying diff based on the sum of 'time_diff_clipped'
@@ -106,33 +94,15 @@ def apply_diff_or_copy(group):
     return group
 
 
-# Qset Types
-question_sequence_data = pd.read_sql(
-    "SELECT question_id, question_set_id, sequence FROM question_set_question_mapping",
-    engine,
-)
-
-
-def get_all_learners(school: str = ""):
+def get_all_learners_options(school: str = ""):
     """Fetch all unique learner IDs from the database."""
-    # Base query to fetch learner IDs along with their school and school_grade
-    query = "SELECT DISTINCT lr.identifier, lr.username as user_name, lr.name as name, sc.name as school FROM learner lr LEFT JOIN school sc ON lr.school_id = sc.identifier"
-
-    # Initialize a list to hold conditions for the WHERE clause
-    conditions = []
+    learners_df = get_data(ALL_LEARNERS_KEY)
 
     # Add school filter if provided
     if school == "No School":
-        conditions.append("sc.name IS NULL")
+        learners_df = learners_df[learners_df["school"].isnull()]
     elif school:
-        conditions.append("sc.name = '{}'".format(school))
-
-    # Append conditions to the query if any exist
-    if conditions:
-        query += " WHERE " + " AND ".join(conditions)
-
-    # Execute the query and return sorted learner names
-    learners_df = pd.read_sql(query, engine)
+        learners_df = learners_df[learners_df["school"] == school]
 
     learners_df = learners_df.sort_values(["user_name"], ascending=[True])
     learners_df["learners_name"] = learners_df["user_name"].str.cat(
@@ -151,44 +121,22 @@ def get_all_learners(school: str = ""):
 def update_learners_options(selected_school: str):
     """Update the options for the learners dropdown based on selected school."""
     all_learners = (
-        get_all_learners(selected_school) if selected_school else get_all_learners()
+        get_all_learners_options(selected_school)
+        if selected_school
+        else get_all_learners_options()
     )
     return [{"label": learner, "value": learner} for learner in all_learners], ""
 
 
 # Learners data is basically the data of all learners attempts of all their question-sets and their questions
-all_learners_data = pd.read_sql(
-    f"""
-    SELECT
-    lpd.learner_id,
-    lpd.question_id,
-    lpd.question_set_id,
-    qs.title->>'en' AS qset_name,
-    lpd.updated_at,
-    lpd.attempts_count,
-    lpd.score,
-    lpd.taxonomy->'class'->'name'->'en' AS qset_grade,
-    lpd.taxonomy->'l1_skill'->'name'->'en' AS operation,
-    cm.name->>'en' AS grade,
-    sc.name AS school,
-    qs.purpose,
-    lr.username AS learner_username,
-    lr.name AS learner_name
-    FROM learner_proficiency_question_level_data lpd
-    LEFT JOIN question_set qs ON lpd.question_set_id = qs.identifier
-    LEFT JOIN learner lr ON lpd.learner_id = lr.identifier
-    LEFT JOIN class_master cm ON lr.taxonomy->'class'->>'identifier' = cm.identifier
-    LEFT JOIN school sc ON lr.school_id = sc.identifier
-    """,
-    engine,
-)
-all_learners_data["updated_at"] = pd.to_datetime(all_learners_data["updated_at"])
-all_learners_data["school"].fillna("No School", inplace=True)
+
+
+print("I am here")
 
 
 # Create Grade Jump Data
-def get_grade_jump_data():
-    grade_jump_data = all_learners_data.copy()
+def get_grade_jump_data(grade_jump_data):
+    # grade_jump_data = all_learners_data.copy()
 
     # Filtering the data as per the purpose column
     grade_jump_data = grade_jump_data[grade_jump_data["purpose"] != "Main Diagnostic"]
@@ -233,18 +181,19 @@ def get_grade_jump_data():
         grade_jump_data.loc[:, "operation_order"] = grade_jump_data["operation"].map(
             operations_priority
         )
+        # Fetch grades
+        grades = get_data(ALL_GRADES_KEY)
+        # Map grades to their priorities for sorting
+        grades_priority = grades.set_index("grade").to_dict().get("id")
         grade_jump_data.loc[:, "grade_order"] = grade_jump_data["qset_grade"].map(
             grades_priority
         )
     return grade_jump_data
 
 
-all_grade_jump_data = get_grade_jump_data()
-
-
 # Create Operator Jump Data
-def get_operator_jump_data():
-    operator_jump_data = all_learners_data.copy()
+def get_operator_jump_data(operator_jump_data):
+    # operator_jump_data = all_learners_data.copy()
 
     if not operator_jump_data.empty:
         operator_jump_data.loc[:, "date"] = operator_jump_data["updated_at"].dt.date
@@ -290,8 +239,6 @@ def get_operator_jump_data():
     return operator_jump_data
 
 
-all_operator_jump_data = get_operator_jump_data()
-
 ###################################  Digital Master Dashboard Logic ###################################
 
 # NOTE: We are displaying data in two time ranges - 1. OVERALL 2. WEEK WISE
@@ -308,10 +255,16 @@ all_operator_jump_data = get_operator_jump_data()
 # - There are sub-divisions of unique learners based on operation - 'Addition', 'Subtraction', 'Multiplication', 'Division'
 # - These subdivisions tell that how many unique learners have attempted questions of these operations till now
 def get_overall_unique_learners(
-    from_date: str, to_date: str, school: str, grade: str, operation: str
+    uni_learners_df,
+    from_date: str,
+    to_date: str,
+    school: str,
+    grade: str,
+    operation: str,
 ):
     # Create a copy of the all_learners_data DataFrame
-    uni_learners_df = all_learners_data.copy()
+    # uni_learners_df = all_learners_data.copy()
+    print("Shape of unique_learners: ", uni_learners_df.shape)
 
     # Filter the DataFrame based on the provided date range if both from_date and to_date are provided
     if from_date and to_date:
@@ -369,7 +322,7 @@ def get_unique_learners(
 ):
     # Fetch overall unique learners count
     overall_unique_learners = get_overall_unique_learners(
-        from_date, to_date, school, grade, operation
+        all_learners_data, from_date, to_date, school, grade, operation
     )
 
     # Create a copy of all learners data
@@ -519,9 +472,11 @@ def get_new_learners_added(final_unique_learners_df, previous_learners_list):
 
 # Q: What is the definition of session?
 # - If we have records of 3 or more learners of a class of a school an a date, then that will be counted as a session.
-def get_overall_sessions(from_date: str, to_date: str, school: str, grade: str):
+def get_overall_sessions(
+    uni_sessions_df, from_date: str, to_date: str, school: str, grade: str
+):
     # Create a copy of the all_learners_data DataFrame to work with
-    uni_sessions_df = all_learners_data.copy()
+    # uni_sessions_df = all_learners_data.copy()
 
     # Apply date filter if 'from_date' and 'to_date' are provided
     if from_date and to_date:
@@ -578,7 +533,9 @@ def get_overall_sessions(from_date: str, to_date: str, school: str, grade: str):
 # - This will provide the number of sessions conducted in that week.
 def get_sessions(all_learners_data, from_date, to_date, school, grade):
     # Fetch the overall sessions count
-    overall_sessions = get_overall_sessions(from_date, to_date, school, grade)
+    overall_sessions = get_overall_sessions(
+        all_learners_data, from_date, to_date, school, grade
+    )
 
     # Create a copy of the all learners data DataFrame
     weekly_sessions_data = all_learners_data.copy()
@@ -653,10 +610,10 @@ def get_sessions(all_learners_data, from_date, to_date, school, grade):
 # - The number of questions is simply called as work done.
 # - overall work done is total number of questions solved by all learners on the digital app till now.
 def get_overall_work_done(
-    from_date: str, to_date: str, school: str, grade: str, operation: str
+    work_done_df, from_date: str, to_date: str, school: str, grade: str, operation: str
 ):
     # Create a copy of the all_learners_data DataFrame to work with
-    work_done_df = all_learners_data.copy()
+    # work_done_df = all_learners_data.copy()
 
     # Apply date filter if both 'from_date' and 'to_date' are provided
     if from_date and to_date:
@@ -709,7 +666,7 @@ def get_work_done(
 ):
     # Fetch the overall work done based on the provided filters
     overall_work_done = get_overall_work_done(
-        from_date, to_date, school, grade, operation
+        all_learners_data, from_date, to_date, school, grade, operation
     )
 
     # Create a copy of the all_learners_data DataFrame to work with
@@ -903,14 +860,14 @@ def get_median_work_done_per_learner(work_done_df):
 # - But, Aggregating the time taken/spent by all learners on the digital app till date is represented as overall time taken
 # NOTE: Maximum limit of time spent for a learner on a date is 45 minutes/ 2700 seconds.
 def get_overall_time_taken(
-    from_date: str, to_date: str, school: str, grade: str, operation: str
+    time_taken_df, from_date: str, to_date: str, school: str, grade: str, operation: str
 ):
     """
     This function calculates the overall time taken by all learners.
     It applies date, grade, and operation filters if provided.
     """
     # Create a copy of the all learners data to work with
-    time_taken_df = all_learners_data.copy()
+    # time_taken_df = all_learners_data.copy()
 
     # Apply date filter if 'from_date' and 'to_date' are provided
     if from_date and to_date:
@@ -974,7 +931,7 @@ def get_total_time_taken(
     """
     # Fetch overall time taken
     overall_time_taken = get_overall_time_taken(
-        from_date, to_date, school, grade, operation
+        all_learners_data, from_date, to_date, school, grade, operation
     )
 
     # Create a copy of all learners data to work with
@@ -1122,10 +1079,10 @@ def avg_time_taken_per_learner(
 # - It will signify the minimum/maximum number of correctness performed by half of the learners.
 # - At overall level, It represents the median of accuracies of all learners on the data attempted till now.
 def get_overall_median_accuracy(
-    from_date: str, to_date: str, school: str, grade: str, operation: str
+    accuracy_df, from_date: str, to_date: str, school: str, grade: str, operation: str
 ):
     # Create a copy of the all_learners_data DataFrame to work with
-    accuracy_df = all_learners_data.copy()
+    # accuracy_df = all_learners_data.copy()
 
     # Apply date filter if 'from_date' and 'to_date' are provided
     if from_date and to_date:
@@ -1182,7 +1139,7 @@ def get_median_accuracy(
 ):
     # Fetch the overall median accuracy of learners
     overall_median_accuracy = get_overall_median_accuracy(
-        from_date, to_date, school, grade, operation
+        all_learners_data, from_date, to_date, school, grade, operation
     )
 
     # Create a copy of the all learners data DataFrame to work with
@@ -1280,9 +1237,13 @@ def get_median_accuracy(
 #    - Median time taken by all learners to jump from Class-One qset-grade to Class-Two qset-grade within a week.
 
 
-def get_median_time_for_grade_jump(from_date, to_date, school, grade, operation):
+def get_median_time_for_grade_jump(
+    all_learners_data, from_date, to_date, school, grade, operation
+):
     # Create a copy of the grade jump data to work with
-    grade_jump_df = all_grade_jump_data.copy()
+    grade_jump_df = get_grade_jump_data(all_learners_data)
+
+    # grade_jump_df = all_grade_jump_data.copy()
     # Filter learners of selected school
     if school:
         grade_jump_df = grade_jump_df[grade_jump_df["school"] == school]
@@ -1385,7 +1346,7 @@ def get_median_time_for_grade_jump(from_date, to_date, school, grade, operation)
         grd_wise_overall_median_time["previous_grade_time"] = np.nan
 
     # Sort qset-grades based on their priority order
-    grades_ls = grades.sort_values(by="id")["grade"]
+    grades_ls = get_data(ALL_GRADES_KEY).sort_values(by="id")["grade"]
     grd_wise_overall_median_time = grd_wise_overall_median_time.reindex(
         grades_ls, fill_value=pd.NA
     )
@@ -1559,13 +1520,16 @@ def get_median_time_for_grade_jump(from_date, to_date, school, grade, operation)
 #    - Median time taken by all learners to jump from **Addition** to **Subtraction** within a week.
 
 
-def get_median_time_for_operation_jump(from_date, to_date, school, grade):
+def get_median_time_for_operation_jump(
+    all_learners_data, from_date, to_date, school, grade
+):
     """
     This function calculates the median time taken for an operation jump across all operations and grades.
     It filters the data based on the provided grade and date range, calculates the median time for each operation jump,
     and returns the overall median time and the weekly median time for operation jumps.
     """
-    operator_jump_df = all_operator_jump_data.copy()
+    operator_jump_df = get_operator_jump_data(all_learners_data)
+    # operator_jump_df = all_operator_jump_data.copy()
 
     # Filter learners of selected school
     if school:
@@ -1795,7 +1759,12 @@ def get_median_time_for_operation_jump(from_date, to_date, school, grade):
 
 
 def get_learners_metrics_data(
-    from_date: str, to_date: str, school: str, grade: str, operation: str
+    all_learners_data_df,
+    from_date: str,
+    to_date: str,
+    school: str,
+    grade: str,
+    operation: str,
 ):
     """
     Fetches learners' proficiency data and calculates various metrics such as unique learners, new learners added, sessions count, work done, and time taken for grade and operation jumps.
@@ -1810,7 +1779,8 @@ def get_learners_metrics_data(
     - final_table_df (DataFrame): A DataFrame containing the calculated metrics.
     """
     # Fetch learners proficiency data
-    all_learners_data_df = all_learners_data.copy()
+    # all_learners_data_df = all_learners_data.copy()
+    print("Shape of all_learners_data_df: ", all_learners_data_df.shape)
 
     # Determine the date range for calculation
     if not (from_date and to_date):
@@ -1896,13 +1866,17 @@ def get_learners_metrics_data(
 
     # Calculate median time taken for grade jump
     overall_median_grade_jump_time, weekly_grade_jump_median_time = (
-        get_median_time_for_grade_jump(from_date, to_date, school, grade, operation)
+        get_median_time_for_grade_jump(
+            all_learners_data_df, from_date, to_date, school, grade, operation
+        )
     )
 
     """ MEDIAN TIME TAKEN FOR OPERATOR JUMP"""
     # Calculate median time taken for operator jump
     overall_median_operator_jump_time, weekly_operator_jump_median_time = (
-        get_median_time_for_operation_jump(from_date, to_date, school, grade)
+        get_median_time_for_operation_jump(
+            all_learners_data_df, from_date, to_date, school, grade
+        )
     )
 
     # Calculate final table data
@@ -1950,6 +1924,18 @@ def get_learners_metrics_data(
     Output("dig-lpm-learner-perf-data-table", "data"),
     Output("dig-lpm-learner-perf-data-table", "columns"),
     Output("dig-lpm-learner-perf-data-table", "style_data_conditional"),
+    Output("last-synced-on", "children"),
+    Output("last-record-updated-at", "children"),
+    Output("dig-lpm-dates-picker", "min_date_allowed"),
+    Output("dig-lpm-dates-picker", "max_date_allowed"),
+    Output("dig-lpm-schools-dropdown", "options"),
+    Output("dig-lpm-grades-dropdown", "options"),
+    Output("dig-ll-schools-dropdown", "options"),
+    Output("dig-ll-grades-dropdown", "options"),
+    Output("dig-ll-qset-purpose-dropdown", "options"),
+    Output("dig-li-schools-dropdown", "options"),
+    Output("dig-li-qset-grades-dropdown", "options"),
+    Output("dig-li-qset-purpose-dropdown", "options"),
     Input("dig-lpm-dates-picker", "start_date"),
     Input("dig-lpm-dates-picker", "end_date"),
     Input("dig-lpm-schools-dropdown", "value"),
@@ -1957,11 +1943,24 @@ def get_learners_metrics_data(
     Input("dig-lpm-operations-dropdown", "value"),
 )
 def update_table(
-    start_date, end_date, selected_school, selected_grade, selected_operation
+    start_date,
+    end_date,
+    selected_school,
+    selected_grade,
+    selected_operation,
 ):
+    all_learners_data = get_data(ALL_LEARNER_DATA_KEY)
+
+    print("What about here")
+
     # Filter the DataFrame based on the selected schools, school_grades and learner_id
     filtered_data = get_learners_metrics_data(
-        start_date, end_date, selected_school, selected_grade, selected_operation
+        all_learners_data,
+        start_date,
+        end_date,
+        selected_school,
+        selected_grade,
+        selected_operation,
     )
 
     # Adjust start_date and end_date if not provided to default to the last 5 weeks
@@ -2009,10 +2008,40 @@ def update_table(
         ),
     ]
 
+    last_synced_on_str = f"Last Synced On: {datetime.fromisoformat(last_synced_on).astimezone(IST).strftime('%d %b %Y %H:%M') if (last_synced_on := last_synced_time()) else '-'}"
+    last_record_updated_at_str = f"Last Record Updated At: {get_min_max_timestamp('max').astimezone(IST).strftime('%d %b %Y %H:%M')}"
+    min_date_allowed = get_min_max_timestamp("min").date()
+    max_date_allowed = get_min_max_timestamp("max").date()
+    school_options = [
+        {"label": school, "value": school} for school in get_data(ALL_SCHOOLS_KEY)
+    ]
+    grades_options = [
+        {"label": school_grade, "value": school_grade}
+        for school_grade in get_data(ALL_GRADES_KEY)
+        .sort_values(by="id")["grade"]
+        .unique()
+    ]
+    qset_type_options = [
+        {"label": qset_type, "value": qset_type}
+        for qset_type in get_data(ALL_QSET_TYPES_KEY)
+    ]
+
     return (
         filtered_data.to_dict("records"),
         columns,
         style_data_conditional,
+        last_synced_on_str,
+        last_record_updated_at_str,
+        min_date_allowed,
+        max_date_allowed,
+        school_options,
+        grades_options,
+        school_options,
+        grades_options,
+        qset_type_options,
+        school_options,
+        grades_options,
+        qset_type_options,
     )  # Return the filtered data
 
 
@@ -2066,11 +2095,11 @@ def update_selected_dates(start_date, end_date):
     Input("dig-ll-schools-dropdown", "value"),
     Input("dig-ll-grades-dropdown", "value"),
     Input("dig-ll-operations-dropdown", "value"),
-    State("dig-lpm-dates-picker", "start_date"),
-    State("dig-lpm-dates-picker", "end_date"),
-    State("dig-lpm-schools-dropdown", "value"),
-    State("dig-lpm-grades-dropdown", "value"),
-    State("dig-lpm-operations-dropdown", "value"),
+    Input("dig-lpm-dates-picker", "start_date"),
+    Input("dig-lpm-dates-picker", "end_date"),
+    Input("dig-lpm-schools-dropdown", "value"),
+    Input("dig-lpm-grades-dropdown", "value"),
+    Input("dig-lpm-operations-dropdown", "value"),
 )
 def update_learners_list_table(
     active_cell,
@@ -2084,6 +2113,9 @@ def update_learners_list_table(
     parent_grade,
     parent_operation,
 ):
+    all_learners_data = get_data(ALL_LEARNER_DATA_KEY)
+    print("Updating learners list table")
+
     # Initialize the learners attempt table data and other variables
     learners_attempt_table_data = pd.DataFrame(columns=["learner_id", "grade"])
     hidden = True
@@ -2124,22 +2156,20 @@ def update_learners_list_table(
             # If the column is a week column, split the column to get the from and to dates
             if is_week_column:
                 from_date, to_date = column.split(",")
-                from_date_dt = pd.to_datetime(from_date, utc=True)
-                to_date_dt = pd.to_datetime(to_date, utc=True)
+                from_date_dt = pd.to_datetime(from_date).date()
+                to_date_dt = pd.to_datetime(to_date).date()
             else:
-                from_date_dt = (
-                    pd.to_datetime(from_date, utc=True) if from_date else None
-                )
-                to_date_dt = pd.to_datetime(to_date, utc=True) if to_date else None
+                from_date_dt = pd.to_datetime(from_date).date() if from_date else None
+                to_date_dt = pd.to_datetime(to_date).date() if to_date else None
 
             # Apply date filters if the dates are present
             if from_date_dt:
                 learners_attempts_data = learners_attempts_data[
-                    learners_attempts_data["updated_at"] >= from_date_dt
+                    learners_attempts_data["updated_at"].dt.date >= from_date_dt
                 ]
             if to_date_dt:
                 learners_attempts_data = learners_attempts_data[
-                    learners_attempts_data["updated_at"] <= to_date_dt
+                    learners_attempts_data["updated_at"].dt.date <= to_date_dt
                 ]
 
             if selected_school:
@@ -2184,7 +2214,6 @@ def update_learners_list_table(
                     learners_attempts_data.groupby(
                         [
                             "learner_id",
-                            "learner_name",
                             "learner_username",
                             "grade",
                             "qset_grade",
@@ -2231,7 +2260,7 @@ def update_learners_list_table(
                     "learner_id"
                 ].map(grade_mapping)
 
-                learner_name_mapping = grouped_data.set_index("learner_id")[
+                learner_name_mapping = learners_attempts_data.set_index("learner_id")[
                     "learner_name"
                 ].to_dict()
                 learners_attempt_table_data["learner_name"] = (
@@ -2265,8 +2294,16 @@ def update_learners_list_table(
     Input("dig-li-qset-purpose-dropdown", "value"),
 )
 def update_learner_info_table(
-    active_cell, data, learner_uni_name, qset_grade, operation, qset_types
+    active_cell,
+    data,
+    learner_uni_name,
+    qset_grade,
+    operation,
+    qset_types,
 ):
+    all_learners_data = get_data(ALL_LEARNER_DATA_KEY)
+    all_learners_data.drop(columns=["sequence"], inplace=True)
+
     # Initialize the learners performance data and other variables
     learners_perf_data = pd.DataFrame(
         columns=[
@@ -2317,6 +2354,7 @@ def update_learner_info_table(
 
             # Check if the selected learner data is not empty
             if not selected_learner_data.empty:
+                question_sequence_data = get_question_sequence_data()
                 selected_learner_data = selected_learner_data.merge(
                     question_sequence_data,
                     how="left",
@@ -2369,7 +2407,7 @@ def update_learner_info_table(
                         max_timestamp=("max_timestamp", "max"),
                         incorrect_attempts=(
                             "incorrect_attempts",
-                            lambda x: ",".join(x),
+                            lambda x: ",".join(s.strip() for s in x if s.strip()),
                         ),
                     )
                     .reset_index()
@@ -2400,7 +2438,24 @@ def update_learner_info_table(
 layout = html.Div(
     [
         html.H1("Master Dashboard"),
-        html.P(id="placeholder"),
+        html.Div(
+            [
+                html.H5(
+                    id="last-synced-on",
+                    style={"margin": "0px"},
+                ),
+                html.H5(
+                    id="last-record-updated-at",
+                    style={"margin": "0px"},
+                ),
+            ],
+            style={
+                "display": "flex",
+                "flexDirection": "column",  # Stack vertically
+                "alignItems": "flex-end",  # Align text to the right
+                "flexWrap": "wrap",
+            },
+        ),
         html.Div(
             [
                 # Clear Dates Button
@@ -2418,32 +2473,16 @@ layout = html.Div(
                         "cursor": "pointer",
                     },
                 ),
-                dcc.DatePickerRange(
-                    id="dig-lpm-dates-picker",
-                    min_date_allowed=min_max_date.loc[0, "min"].date(),
-                    max_date_allowed=min_max_date.loc[0, "max"].date(),
-                ),
+                dcc.DatePickerRange(id="dig-lpm-dates-picker"),
                 # Dropdown for selecting school
                 dcc.Dropdown(
                     id="dig-lpm-schools-dropdown",
-                    options=[
-                        {"label": school, "value": school}
-                        for school in schools.sort_values(by="school_name")[
-                            "school_name"
-                        ].unique()
-                    ],
                     placeholder="Select School",
                     style={"width": "300px", "margin": "10px"},
                 ),
                 # Dropdown for selecting grade
                 dcc.Dropdown(
                     id="dig-lpm-grades-dropdown",
-                    options=[
-                        {"label": school_grade, "value": school_grade}
-                        for school_grade in grades.sort_values(by="id")[
-                            "grade"
-                        ].unique()
-                    ],
                     placeholder="Select Grade",
                     style={"width": "300px", "margin": "10px"},
                 ),
@@ -2526,24 +2565,12 @@ layout = html.Div(
                         # Dropdown for selecting school
                         dcc.Dropdown(
                             id="dig-ll-schools-dropdown",
-                            options=[
-                                {"label": school, "value": school}
-                                for school in schools.sort_values(by="school_name")[
-                                    "school_name"
-                                ].unique()
-                            ],
                             placeholder="Select School",
                             style={"width": "300px", "margin": "10px"},
                         ),
                         # Dropdown for selecting grade
                         dcc.Dropdown(
                             id="dig-ll-grades-dropdown",
-                            options=[
-                                {"label": school_grade, "value": school_grade}
-                                for school_grade in grades.sort_values(by="id")[
-                                    "grade"
-                                ].unique()
-                            ],
                             placeholder="Select Grade",
                             style={"width": "300px", "margin": "10px"},
                         ),
@@ -2564,12 +2591,6 @@ layout = html.Div(
                         ),
                         dcc.Dropdown(
                             id="dig-ll-qset-purpose-dropdown",
-                            options=[
-                                {"label": qset_type, "value": qset_type}
-                                for qset_type in qset_types["purpose"]
-                                .sort_values()
-                                .unique()
-                            ],
                             multi=True,
                             placeholder="Select Question Set Type",
                             style={"width": "300px", "margin": "10px"},
@@ -2713,34 +2734,18 @@ layout = html.Div(
                                 # Dropdown for selecting school
                                 dcc.Dropdown(
                                     id="dig-li-schools-dropdown",
-                                    options=[
-                                        {"label": school, "value": school}
-                                        for school in schools.sort_values(
-                                            by="school_name"
-                                        )["school_name"].unique()
-                                    ],
                                     placeholder="Select School",
                                     style={"width": "300px", "margin": "10px"},
                                 ),
                                 # Dropdown for selecting learner_id
                                 dcc.Dropdown(
                                     id="dig-li-learner-dropdown",
-                                    options=[
-                                        {"label": learner_id, "value": learner_id}
-                                        for learner_id in get_all_learners()
-                                    ],
                                     placeholder="Select Learner",
                                     style={"width": "300px", "margin": "10px"},
                                 ),
                                 # Dropdown for selecting grade
                                 dcc.Dropdown(
                                     id="dig-li-qset-grades-dropdown",
-                                    options=[
-                                        {"label": school_grade, "value": school_grade}
-                                        for school_grade in grades.sort_values(by="id")[
-                                            "grade"
-                                        ].unique()
-                                    ],
                                     placeholder="Select Qset Grade",
                                     style={"width": "300px", "margin": "10px"},
                                 ),
@@ -2761,12 +2766,6 @@ layout = html.Div(
                                 ),
                                 dcc.Dropdown(
                                     id="dig-li-qset-purpose-dropdown",
-                                    options=[
-                                        {"label": qset_type, "value": qset_type}
-                                        for qset_type in qset_types["purpose"]
-                                        .sort_values()
-                                        .unique()
-                                    ],
                                     multi=True,
                                     placeholder="Select Question Set Type",
                                     style={"width": "300px", "margin": "10px"},
