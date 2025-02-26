@@ -4,14 +4,13 @@ import pandas as pd
 from dash import Dash, Input, Output, callback, dash_table, dcc, html
 
 from db_utils import (
-    ALL_GRADES_KEY,
-    ALL_L2_SKILLS_KEY,
-    ALL_L3_SKILLS_KEY,
-    ALL_LEARNER_DATA_KEY,
-    ALL_QSET_TYPES_KEY,
-    ALL_REPOSITORY_NAMES_KEY,
+    get_all_learners_data_df,
     get_all_question_sets,
-    get_data,
+    get_grades_list,
+    get_l2_skills_list,
+    get_l3_skills_list,
+    get_qset_types_list,
+    get_repository_names_list,
 )
 
 
@@ -58,7 +57,7 @@ def get_question_set_data(
     selected_l3_skill,
     selected_sheet_type,
 ):
-    all_learners_data = get_data(ALL_LEARNER_DATA_KEY)
+    all_learners_data = get_all_learners_data_df()
     completed_question_sets_data = all_learners_data[
         all_learners_data["status"] == "completed"
     ]
@@ -120,27 +119,26 @@ def update_table(
 ):
     # Repository dropdown options
     repo_options = [
-        {"label": repo, "value": repo} for repo in get_data(ALL_REPOSITORY_NAMES_KEY)
+        {"label": repo, "value": repo} for repo in get_repository_names_list()
     ]
 
     # L2 skill dropdown options
     l2_skill_options = [
         {"label": l2_skill, "value": l2_skill}
-        for l2_skill in get_data(ALL_L2_SKILLS_KEY)
+        for l2_skill in get_l2_skills_list()
         if l2_skill
     ]
 
     # L3 skill dropdown options
     l3_skill_options = [
         {"label": l3_skill, "value": l3_skill}
-        for l3_skill in get_data(ALL_L3_SKILLS_KEY)
+        for l3_skill in get_l3_skills_list()
         if l3_skill
     ]
 
     # Qset type dropdown options
     qset_type_options = [
-        {"label": qset_type, "value": qset_type}
-        for qset_type in get_data(ALL_QSET_TYPES_KEY)
+        {"label": qset_type, "value": qset_type} for qset_type in get_qset_types_list()
     ]
 
     # Return empty data if no filters are selected
@@ -291,7 +289,7 @@ def update_table(
     )
 
     # Fetch grades
-    grades = get_data(ALL_GRADES_KEY)
+    grades = get_grades_list()
     # Map grades to their priorities for sorting
     grades_priority = grades.set_index("grade").to_dict().get("id")
 

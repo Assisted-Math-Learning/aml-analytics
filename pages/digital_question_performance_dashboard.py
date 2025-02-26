@@ -4,10 +4,9 @@ import pandas as pd
 from dash import Dash, Input, Output, callback, dash_table, dcc, html
 
 from db_utils import (
-    ALL_REPOSITORY_NAMES_KEY,
     get_all_question_sets,
-    get_data,
     get_question_level_data,
+    get_repository_names_list,
 )
 
 
@@ -26,7 +25,7 @@ dash.register_page(__name__)
 def update_table(selected_qset):
     # Repository dropdown options
     repo_options = [
-        {"label": repo, "value": repo} for repo in get_data(ALL_REPOSITORY_NAMES_KEY)
+        {"label": repo, "value": repo} for repo in get_repository_names_list()
     ]
 
     # Return an empty DataFrame if no question set is selected
