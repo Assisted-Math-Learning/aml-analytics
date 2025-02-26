@@ -35,3 +35,4 @@ sqlalchemy
 sshtunnel
 gspread
 python-dotenv
+redis==5.2.1

@@ -1,17 +1,22 @@
-import config
 import dash
 import pandas as pd
 
-from dash import Dash, Input, Output, State, callback, dash_table, dcc, html, no_update
-from sqlalchemy import create_engine
+from dash import Dash, Input, Output, callback, dash_table, dcc, html
+
+from db_utils import (
+    ALL_GRADES_KEY,
+    ALL_L2_SKILLS_KEY,
+    ALL_L3_SKILLS_KEY,
+    ALL_LEARNER_DATA_KEY,
+    ALL_QSET_TYPES_KEY,
+    ALL_REPOSITORY_NAMES_KEY,
+    get_all_question_sets,
+    get_data,
+)
 
 
 # Register the page
 dash.register_page(__name__)
-
-# Create the connection string for the database
-connection_string = f"postgresql://{config.DB_USER}:{config.DB_PASSWORD}@{config.DB_HOST}:{config.DB_PORT}/{config.DB_NAME}"
-engine = create_engine(connection_string)
 
 """ UTILS """
 # Define color coding for operations and grades
@@ -53,79 +58,57 @@ def get_question_set_data(
     selected_l3_skill,
     selected_sheet_type,
 ):
-    # Base query to fetch question set data
-    question_set_dt_query = f"""
-    SELECT qs.identifier AS question_set_id,
-        qs.x_id AS question_set_uid,
-        lpd.learner_id AS learner_id,
-        qs.taxonomy->'l1_skill'->'name'->>'en' AS operation,
-        qs.taxonomy->'class'->'name'->>'en' AS qset_grade,
-        qs.sequence AS sequence,
-        qs.purpose AS purpose,
-        qs.title->>'en' AS qset_name,
-        qs.taxonomy->'l2_skill'->0->'name'->>'en' AS l2_skill,
-        qs.taxonomy->'l3_skill'->0->'name'->>'en' AS l3_skill,
-        lpd.score AS score,
-        lpd.updated_at,
-        DATE(lpd.updated_at) AS updated_date
-    FROM learner_journey lj
-    LEFT JOIN learner_proficiency_question_level_data lpd ON lj.question_set_id = lpd.question_set_id AND lj.learner_id = lpd.learner_id
-    LEFT JOIN question_set qs ON qs.identifier = lj.question_set_id
-    LEFT JOIN repository repo ON repo.identifier = qs.repository->>'identifier'
-    """
-
-    # List to hold query conditions
-    conditions = []
-
-    # Add condition for completed status
-    status_query = "lj.status='completed'"
-    conditions.append(status_query)
+    all_learners_data = get_data(ALL_LEARNER_DATA_KEY)
+    completed_question_sets_data = all_learners_data[
+        all_learners_data["status"] == "completed"
+    ]
 
     # Add conditions based on selected filters
     if selected_repo:
-        conditions.append(f"repo.name->>'en' = '{selected_repo}'")
+        completed_question_sets_data = completed_question_sets_data[
+            completed_question_sets_data["repo_name"] == selected_repo
+        ]
 
     if selected_qsets:
-        qsets_query = "qs.x_id IN ({})".format(
-            ", ".join(f"'{qset_name}'" for qset_name in selected_qsets)
-        )
-        conditions.append(qsets_query)
+        completed_question_sets_data = completed_question_sets_data[
+            completed_question_sets_data["qset_uid"].isin(selected_qsets)
+        ]
 
     if selected_operation:
-        conditions.append(
-            "qs.taxonomy->'l1_skill'->'name'->>'en' = '{}'".format(selected_operation)
-        )
+        completed_question_sets_data = completed_question_sets_data[
+            completed_question_sets_data["l1_skill"] == selected_operation
+        ]
 
     if selected_l2_skill:
-        conditions.append(
-            "qs.taxonomy->'l2_skill'->0->'name'->>'en' = '{}'".format(selected_l2_skill)
-        )
+        completed_question_sets_data = completed_question_sets_data[
+            completed_question_sets_data["l2_skill"] == selected_l2_skill
+        ]
 
     if selected_l3_skill:
-        conditions.append(
-            "qs.taxonomy->'l3_skill'->0->'name'->>'en' = '{}'".format(selected_l3_skill)
-        )
+        completed_question_sets_data = completed_question_sets_data[
+            completed_question_sets_data["l3_skill"] == selected_l3_skill
+        ]
 
     if selected_sheet_type:
-        conditions.append("qs.purpose = '{}'".format(selected_sheet_type))
+        completed_question_sets_data = completed_question_sets_data[
+            completed_question_sets_data["purpose"] == selected_sheet_type
+        ]
 
-    # Append conditions to the query
-    question_set_dt_query += " WHERE " + " AND ".join(conditions)
-
-    # Execute the query and fetch data
-    question_set_data = pd.read_sql(question_set_dt_query, engine)
-    return question_set_data
+    return completed_question_sets_data
 
 
 @callback(
     Output("dig-qsp-data-table", "data"),
+    Output("dig-qsp-repo-dropdown", "options"),
+    Output("dig-qsp-l2-skill-dropdown", "options"),
+    Output("dig-qsp-l3-skill-dropdown", "options"),
+    Output("dig-qsp-qset-types-dropdown", "options"),
     Input("dig-qsp-repo-dropdown", "value"),
     Input("dig-qsp-qset-dropdown", "value"),
     Input("dig-qsp-operations-dropdown", "value"),
     Input("dig-qsp-l2-skill-dropdown", "value"),
     Input("dig-qsp-l3-skill-dropdown", "value"),
     Input("dig-qsp-qset-types-dropdown", "value"),
-    prevent_initial_call=True,
 )
 def update_table(
     selected_repo,
@@ -135,6 +118,31 @@ def update_table(
     selected_l3_skill,
     selected_sheet_type,
 ):
+    # Repository dropdown options
+    repo_options = [
+        {"label": repo, "value": repo} for repo in get_data(ALL_REPOSITORY_NAMES_KEY)
+    ]
+
+    # L2 skill dropdown options
+    l2_skill_options = [
+        {"label": l2_skill, "value": l2_skill}
+        for l2_skill in get_data(ALL_L2_SKILLS_KEY)
+        if l2_skill
+    ]
+
+    # L3 skill dropdown options
+    l3_skill_options = [
+        {"label": l3_skill, "value": l3_skill}
+        for l3_skill in get_data(ALL_L3_SKILLS_KEY)
+        if l3_skill
+    ]
+
+    # Qset type dropdown options
+    qset_type_options = [
+        {"label": qset_type, "value": qset_type}
+        for qset_type in get_data(ALL_QSET_TYPES_KEY)
+    ]
+
     # Return empty data if no filters are selected
     if (
         (not selected_repo)
@@ -144,7 +152,13 @@ def update_table(
         and (not selected_operation)
         and (not selected_sheet_type)
     ):
-        return pd.DataFrame([]).to_dict("records")
+        return (
+            pd.DataFrame([]).to_dict("records"),
+            repo_options,
+            l2_skill_options,
+            l3_skill_options,
+            qset_type_options,
+        )
 
     # The query retrieves detailed question set data for completed learner journeys, filtering by selected question sets, operations, skills, and sheet type.
     # It constructs conditions dynamically based on user selections and executes the query to fetch the filtered data.
@@ -159,14 +173,22 @@ def update_table(
 
     # Return empty data if no results are found
     if question_set_data.empty:
-        return pd.DataFrame([]).to_dict("records")
+        return (
+            pd.DataFrame([]).to_dict("records"),
+            repo_options,
+            l2_skill_options,
+            l3_skill_options,
+            qset_type_options,
+        )
+
+    question_set_data["updated_date"] = question_set_data["updated_at"].dt.date
 
     # Group data by learner and calculate time spent on and marks scored in respective qsets on each date
     question_set_data_per_learner = (
         question_set_data.groupby(
             [
                 "question_set_id",
-                "question_set_uid",
+                "qset_uid",
                 "learner_id",
                 "operation",
                 "qset_grade",
@@ -198,7 +220,7 @@ def update_table(
         question_set_data_per_learner.groupby(
             [
                 "question_set_id",
-                "question_set_uid",
+                "qset_uid",
                 "learner_id",
                 "operation",
                 "qset_grade",
@@ -233,7 +255,7 @@ def update_table(
         final_question_set_data_per_learner.groupby(
             [
                 "question_set_id",
-                "question_set_uid",
+                "qset_uid",
                 "operation",
                 "qset_grade",
                 "sequence",
@@ -268,6 +290,11 @@ def update_table(
         lambda x: round(x / 60, 2) if pd.notna(x) else x
     )
 
+    # Fetch grades
+    grades = get_data(ALL_GRADES_KEY)
+    # Map grades to their priorities for sorting
+    grades_priority = grades.set_index("grade").to_dict().get("id")
+
     # Map operation and grade to their order for sorting
     final_df.loc[:, "operation_order"] = final_df["operation"].map(operations_priority)
     final_df.loc[:, "qset_grade_order"] = final_df["qset_grade"].map(grades_priority)
@@ -279,33 +306,16 @@ def update_table(
         inplace=True,
     )
 
-    return final_df.to_dict("records")
+    return (
+        final_df.to_dict("records"),
+        repo_options,
+        l2_skill_options,
+        l3_skill_options,
+        qset_type_options,
+    )
 
 
 ##### DROPDOWNS OPTIONS
-# Fetch distinct Qset types from the database
-qset_types = pd.read_sql("SELECT DISTINCT(purpose) FROM question_set", engine)
-
-# Fetch distinct repository names from the database
-repository_options = pd.read_sql(
-    "SELECT DISTINCT(name->>'en') AS repo_name FROM repository",
-    engine,
-)
-repo_names_sorted = repository_options.sort_values(by="repo_name")[
-    "repo_name"
-].drop_duplicates()
-
-
-def get_all_question_sets(repository_name):
-    # Fetch distinct question set IDs from the database
-    query = f"SELECT DISTINCT(qs.x_id) AS qset_id FROM question_set qs LEFT JOIN repository repo ON repo.identifier = qs.repository->>'identifier'"
-
-    # Add condition for repository name if provided
-    if repository_name:
-        query += f" WHERE repo.name->>'en'='{repository_name}'"
-
-    question_set_ids = pd.read_sql(query, engine)
-    return question_set_ids["qset_id"].sort_values().unique()
 
 
 @callback(
@@ -320,24 +330,6 @@ def update_qset_options(selected_repo):
     return [{"label": qset_id, "value": qset_id} for qset_id in question_set_ids]
 
 
-# Fetch distinct L2 skill types
-l2_skills = pd.read_sql(
-    "SELECT DISTINCT(taxonomy->'l2_skill'->0->'name'->>'en') AS l2_skill FROM question_set",
-    engine,
-)
-
-# Fetch distinct L3 skill types
-l3_skills = pd.read_sql(
-    "SELECT DISTINCT(taxonomy->'l3_skill'->0->'name'->>'en') AS l3_skill FROM question_set",
-    engine,
-)
-
-# Fetch grades from the database
-grades = pd.read_sql("SELECT id, cm.name->>'en' AS grade FROM class_master cm", engine)
-
-# Map grades to their priorities for sorting
-grades_priority = grades.set_index("grade").to_dict().get("id")
-
 ###################################  Digital QSet Performance Dashboard Layout ###################################
 
 # Define the layout of the Dash app
@@ -349,9 +341,6 @@ layout = html.Div(
                 # Dropdown for selecting repository name
                 dcc.Dropdown(
                     id="dig-qsp-repo-dropdown",
-                    options=[
-                        {"label": repo, "value": repo} for repo in repo_names_sorted
-                    ],
                     placeholder="Select Repository",
                     style={"width": "300px", "margin": "10px"},
                 ),
@@ -380,22 +369,12 @@ layout = html.Div(
                 # Dropdown for selecting L2 skills
                 dcc.Dropdown(
                     id="dig-qsp-l2-skill-dropdown",
-                    options=[
-                        {"label": l2_skill, "value": l2_skill}
-                        for l2_skill in l2_skills["l2_skill"].sort_values().unique()
-                        if l2_skill
-                    ],
                     placeholder="Select L2 Skill",
                     style={"width": "300px", "margin": "10px"},
                 ),
                 # Dropdown for selecting L3 skills
                 dcc.Dropdown(
                     id="dig-qsp-l3-skill-dropdown",
-                    options=[
-                        {"label": l3_skill, "value": l3_skill}
-                        for l3_skill in l3_skills["l3_skill"].sort_values().unique()
-                        if l3_skill
-                    ],
                     placeholder="Select L3 Skill",
                     style={"width": "350px", "margin": "10px"},
                     optionHeight=55,
@@ -403,10 +382,6 @@ layout = html.Div(
                 # Dropdown for selecting question set types
                 dcc.Dropdown(
                     id="dig-qsp-qset-types-dropdown",
-                    options=[
-                        {"label": qset_type, "value": qset_type}
-                        for qset_type in qset_types["purpose"].sort_values().unique()
-                    ],
                     placeholder="Select Question Set Type",
                     style={"width": "300px", "margin": "10px"},
                 ),
@@ -429,7 +404,7 @@ layout = html.Div(
                     columns=[
                         {"name": "Operation", "id": "operation"},
                         {"name": "Class", "id": "qset_grade"},
-                        {"name": "Question Set UID", "id": "question_set_uid"},
+                        {"name": "Question Set UID", "id": "qset_uid"},
                         {"name": "Question Set Sequence", "id": "sequence"},
                         {"name": "Question Set Type", "id": "purpose"},
                         {"name": "Question Set Name", "id": "qset_name"},
