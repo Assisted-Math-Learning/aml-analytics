@@ -4,12 +4,11 @@ import pandas as pd
 from dash import Dash, Input, Output, callback, dash_table, dcc, html
 
 from db_utils import (
-    ALL_GRADES_KEY,
-    ALL_QSET_TYPES_KEY,
-    ALL_REPOSITORY_NAMES_KEY,
-    get_data,
+    get_grades_list,
     get_qset_agg_data,
     get_qset_score_data,
+    get_qset_types_list,
+    get_repository_names_list,
 )
 
 
@@ -103,7 +102,7 @@ def update_table(selected_repo, selected_sheet_type):
     )
 
     # Fetch grades
-    grades = get_data(ALL_GRADES_KEY)
+    grades = get_grades_list()
     # Map grades to their priorities for sorting
     grades_priority = grades.set_index("grade").to_dict().get("id")
 
@@ -120,13 +119,12 @@ def update_table(selected_repo, selected_sheet_type):
 
     # Repository dropdown options
     repo_options = [
-        {"label": repo, "value": repo} for repo in get_data(ALL_REPOSITORY_NAMES_KEY)
+        {"label": repo, "value": repo} for repo in get_repository_names_list()
     ]
 
     # Qset type dropdown options
     qset_type_options = [
-        {"label": qset_type, "value": qset_type}
-        for qset_type in get_data(ALL_QSET_TYPES_KEY)
+        {"label": qset_type, "value": qset_type} for qset_type in get_qset_types_list()
     ]
 
     # Return the final dataframe as a dictionary for the Dash DataTable

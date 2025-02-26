@@ -1,13 +1,15 @@
 import dash
 from db_utils import (
-    ALL_GRADES_KEY,
-    ALL_LEARNER_DATA_KEY,
     ALL_LEARNERS_KEY,
-    ALL_QSET_TYPES_KEY,
-    ALL_SCHOOLS_KEY,
+    ALL_LOGGED_IN_USERS_KEY,
+    get_all_learners_data_df,
     get_data,
+    get_grades_list,
     get_min_max_timestamp,
+    get_qset_types_list,
     get_question_sequence_data,
+    get_schools_list,
+    get_tenants_list,
     last_synced_time,
 )
 import numpy as np
@@ -148,7 +150,15 @@ def get_grade_jump_data(grade_jump_data):
         # Aggregating data
         grade_jump_data = (
             grade_jump_data.groupby(
-                ["learner_id", "school", "grade", "operation", "qset_grade", "date"]
+                [
+                    "learner_id",
+                    "tenant_name",
+                    "school",
+                    "grade",
+                    "operation",
+                    "qset_grade",
+                    "date",
+                ]
             )
             .agg(min_time=("updated_at", "min"), max_time=("updated_at", "max"))
             .reset_index()
@@ -182,7 +192,7 @@ def get_grade_jump_data(grade_jump_data):
             operations_priority
         )
         # Fetch grades
-        grades = get_data(ALL_GRADES_KEY)
+        grades = get_grades_list()
         # Map grades to their priorities for sorting
         grades_priority = grades.set_index("grade").to_dict().get("id")
         grade_jump_data.loc[:, "grade_order"] = grade_jump_data["qset_grade"].map(
@@ -201,7 +211,7 @@ def get_operator_jump_data(operator_jump_data):
         # Aggregating data
         operator_jump_data = (
             operator_jump_data.groupby(
-                ["learner_id", "school", "grade", "operation", "date"]
+                ["learner_id", "tenant_name", "school", "grade", "operation", "date"]
             )
             .agg(min_time=("updated_at", "min"), max_time=("updated_at", "max"))
             .reset_index()
@@ -261,6 +271,7 @@ def get_overall_unique_learners(
     school: str,
     grade: str,
     operation: str,
+    tenant: str,
 ):
     # Create a copy of the all_learners_data DataFrame
     # uni_learners_df = all_learners_data.copy()
@@ -284,6 +295,10 @@ def get_overall_unique_learners(
     # Apply operation filter if 'operation' is provided
     if operation:
         uni_learners_df = uni_learners_df[uni_learners_df["operation"] == operation]
+
+    # Apply tenant filter if 'tenant' is provided
+    if tenant:
+        uni_learners_df = uni_learners_df[uni_learners_df["tenant_name"] == tenant]
 
     # Count distinct learners
     overall_count = uni_learners_df["learner_id"].nunique()
@@ -318,11 +333,11 @@ def get_overall_unique_learners(
 # The definition of unique learners is same as above. The difference is that here the data will be generated for per week.
 # The Number of learners solved/attempted even a single question in that week.
 def get_unique_learners(
-    all_learners_data, from_date, to_date, school, grade, operation
+    all_learners_data, from_date, to_date, school, grade, operation, tenant
 ):
     # Fetch overall unique learners count
     overall_unique_learners = get_overall_unique_learners(
-        all_learners_data, from_date, to_date, school, grade, operation
+        all_learners_data, from_date, to_date, school, grade, operation, tenant
     )
 
     # Create a copy of all learners data
@@ -355,6 +370,11 @@ def get_unique_learners(
     if operation:
         weekly_unique_learners = weekly_unique_learners[
             weekly_unique_learners["operation"] == operation
+        ]
+    # Filter learners of selected tenant
+    if tenant:
+        weekly_unique_learners = weekly_unique_learners[
+            weekly_unique_learners["tenant_name"] == tenant
         ]
 
     if not weekly_unique_learners.empty:
@@ -466,6 +486,147 @@ def get_new_learners_added(final_unique_learners_df, previous_learners_list):
     return weekly_new_learners_added
 
 
+""" LOGGED IN USERS """
+########################## - OVERALL
+
+
+# Q: What are the logged in users?
+# - The number of logged in users is defined as the total number of users who have logged in during the given period.
+# - It is calculated by counting the number of unique learners who have logged in during the given period.
+def get_overall_logged_in_users(
+    logged_in_users_df,
+    from_date: str,
+    to_date: str,
+    school: str,
+    grade: str,
+    tenant: str,
+):
+    # Apply date filter if 'from_date' and 'to_date' are provided
+    if from_date and to_date:
+        # Filter the DataFrame to include only records within the specified date range
+        logged_in_users_df = logged_in_users_df[
+            (logged_in_users_df["created_on"].dt.date >= from_date)
+            & (logged_in_users_df["created_on"].dt.date <= to_date)
+        ]
+
+    # Filter learners of selected school
+    if school:
+        logged_in_users_df = logged_in_users_df[logged_in_users_df["school"] == school]
+
+    # Apply grade filter if 'grade' is provided
+    if grade:
+        # Filter the DataFrame to include only records of the specified grade
+        logged_in_users_df = logged_in_users_df[logged_in_users_df["grade"] == grade]
+
+    # Apply tenant filter if 'tenant' is provided
+    if tenant:
+        # Filter the DataFrame to include only records of the specified tenant
+        logged_in_users_df = logged_in_users_df[
+            logged_in_users_df["tenant_name"] == tenant
+        ]
+
+    # Count the number of unique logged-in users
+    overall_count = logged_in_users_df["learner_id"].count()
+    # Create a DataFrame to hold the overall count
+    overall_count_df = pd.DataFrame([{"overall_count": overall_count}])
+
+    return overall_count_df
+
+
+########################## - WEEK WISE
+
+
+# The definition of logged in users is same as above. The difference is that here the data will be generated for per week.
+# The Number of learners logged in the system per week.
+def get_logged_in_users(
+    from_date: str, to_date: str, school: str, grade: str, tenant: str
+):
+    # Fetch logged in users data
+    logged_in_users_df = get_data(ALL_LOGGED_IN_USERS_KEY)
+
+    # Convert `created_on` to datetime type
+    logged_in_users_df["created_on"] = pd.to_datetime(logged_in_users_df["created_on"])
+
+    # Add `No School` to school column if school is empty
+    logged_in_users_df["school"] = logged_in_users_df["school"].fillna("No School")
+
+    # Extract logged in date from `created_on` column
+    logged_in_users_df["logged_in_date"] = logged_in_users_df["created_on"].dt.date
+
+    # Drop duplicates on `learner_id` and `logged_in_date` columns
+    logged_in_users_df.drop_duplicates(
+        subset=["learner_id", "logged_in_date"], inplace=True
+    )
+
+    # Fetch overall unique logged in users count
+    overall_logged_in_users = get_overall_logged_in_users(
+        logged_in_users_df, from_date, to_date, school, grade, tenant
+    )
+
+    # Create a copy of the logged in users data
+    weekly_logged_in_users = logged_in_users_df.copy()
+
+    # Filter records after from_date
+    if from_date:
+        weekly_logged_in_users = weekly_logged_in_users[
+            weekly_logged_in_users["created_on"].dt.date >= from_date
+        ]
+
+    # Filter records before to_date
+    if to_date:
+        weekly_logged_in_users = weekly_logged_in_users[
+            weekly_logged_in_users["created_on"].dt.date <= to_date
+        ]
+
+    # Filter records of a particular school
+    if school:
+        weekly_logged_in_users = weekly_logged_in_users[
+            weekly_logged_in_users["school"] == school
+        ]
+
+    # Filter records of a particular grade
+    if grade:
+        weekly_logged_in_users = weekly_logged_in_users[
+            weekly_logged_in_users["grade"] == grade
+        ]
+
+    # Filter records of a particular tenant
+    if tenant:
+        weekly_logged_in_users = weekly_logged_in_users[
+            weekly_logged_in_users["tenant_name"] == tenant
+        ]
+
+    if not weekly_logged_in_users.empty:
+        # Map week range to every entry based on date
+        weekly_logged_in_users.loc[:, "week_range"] = weekly_logged_in_users[
+            "logged_in_date"
+        ].apply(lambda x: calculate_range(x))
+
+        # Rename 'learner_id' to 'logged_in_learners'
+        weekly_logged_in_users.rename(
+            columns={"learner_id": "logged_in_learners"}, inplace=True
+        )
+
+        # Create pivot table for weekly representation of logged in users count
+        weekly_logged_in_users_cnt_table = pd.pivot_table(
+            weekly_logged_in_users,
+            columns="week_range",  # columns
+            values="logged_in_learners",  # Values to aggregate
+            aggfunc="count",  # Aggregation function
+        ).reset_index(names=["metrics"])
+        weekly_logged_in_users_cnt_table.loc[0, "metrics"] = "logged in learners"
+    else:
+        weekly_logged_in_users_cnt_table = pd.DataFrame(
+            {"metrics": ["logged in learners"]}
+        )
+        weekly_logged_in_users = pd.DataFrame(
+            columns=["logged_in_learners", "logged_in_date", "week_range"]
+        )
+
+    # Return the logged in users count, weekly logged in users count, and the logged in users DataFrame
+    return overall_logged_in_users, weekly_logged_in_users_cnt_table
+
+
 """ SESSIONS COUNT """
 ########################## - OVERALL
 
@@ -473,7 +634,7 @@ def get_new_learners_added(final_unique_learners_df, previous_learners_list):
 # Q: What is the definition of session?
 # - If we have records of 3 or more learners of a class of a school an a date, then that will be counted as a session.
 def get_overall_sessions(
-    uni_sessions_df, from_date: str, to_date: str, school: str, grade: str
+    uni_sessions_df, from_date: str, to_date: str, school: str, grade: str, tenant: str
 ):
     # Create a copy of the all_learners_data DataFrame to work with
     # uni_sessions_df = all_learners_data.copy()
@@ -494,6 +655,11 @@ def get_overall_sessions(
     if grade:
         # Filter the DataFrame to include only records of the specified grade
         uni_sessions_df = uni_sessions_df[uni_sessions_df["grade"] == grade]
+
+    # Apply tenant filter if 'tenant' is provided
+    if tenant:
+        # Filter the DataFrame to include only records of the specified tenant
+        uni_sessions_df = uni_sessions_df[uni_sessions_df["tenant_name"] == tenant]
 
     # Check if the DataFrame is empty after applying filters
     if uni_sessions_df.empty:
@@ -531,10 +697,10 @@ def get_overall_sessions(
 
 
 # - This will provide the number of sessions conducted in that week.
-def get_sessions(all_learners_data, from_date, to_date, school, grade):
+def get_sessions(all_learners_data, from_date, to_date, school, grade, tenant):
     # Fetch the overall sessions count
     overall_sessions = get_overall_sessions(
-        all_learners_data, from_date, to_date, school, grade
+        all_learners_data, from_date, to_date, school, grade, tenant
     )
 
     # Create a copy of the all learners data DataFrame
@@ -562,6 +728,12 @@ def get_sessions(all_learners_data, from_date, to_date, school, grade):
     if grade:
         weekly_sessions_data = weekly_sessions_data[
             weekly_sessions_data["grade"] == grade
+        ]
+
+    # Filters learners of the selected tenant
+    if tenant:
+        weekly_sessions_data = weekly_sessions_data[
+            weekly_sessions_data["tenant_name"] == tenant
         ]
 
     # Check if the DataFrame is not empty after applying filters
@@ -610,7 +782,13 @@ def get_sessions(all_learners_data, from_date, to_date, school, grade):
 # - The number of questions is simply called as work done.
 # - overall work done is total number of questions solved by all learners on the digital app till now.
 def get_overall_work_done(
-    work_done_df, from_date: str, to_date: str, school: str, grade: str, operation: str
+    work_done_df,
+    from_date: str,
+    to_date: str,
+    school: str,
+    grade: str,
+    operation: str,
+    tenant: str,
 ):
     # Create a copy of the all_learners_data DataFrame to work with
     # work_done_df = all_learners_data.copy()
@@ -636,6 +814,11 @@ def get_overall_work_done(
     if operation:
         # Filter the DataFrame to include only records of the specified operation
         work_done_df = work_done_df[work_done_df["operation"] == operation]
+
+    # Apply tenant filter if 'tenant' is provided
+    if tenant:
+        # Filter the DataFrame to include only records of the specified tenant
+        work_done_df = work_done_df[work_done_df["tenant_name"] == tenant]
 
     # Check if the DataFrame is empty after applying all filters
     if work_done_df.empty:
@@ -663,10 +846,11 @@ def get_work_done(
     school: str,
     grade: str,
     operation: str,
+    tenant: str,
 ):
     # Fetch the overall work done based on the provided filters
     overall_work_done = get_overall_work_done(
-        all_learners_data, from_date, to_date, school, grade, operation
+        all_learners_data, from_date, to_date, school, grade, operation, tenant
     )
 
     # Create a copy of the all_learners_data DataFrame to work with
@@ -695,6 +879,11 @@ def get_work_done(
     if operation:
         # Filter the DataFrame to include only records of the specified 'operation'
         work_done_df = work_done_df[work_done_df["operation"] == operation]
+
+    # Apply tenant filter if 'tenant' is provided
+    if tenant:
+        # Filter the DataFrame to include only records of the specified 'tenant'
+        work_done_df = work_done_df[work_done_df["tenant_name"] == tenant]
 
     # Check if the DataFrame is empty after applying all filters
     if not work_done_df.empty:
@@ -860,7 +1049,13 @@ def get_median_work_done_per_learner(work_done_df):
 # - But, Aggregating the time taken/spent by all learners on the digital app till date is represented as overall time taken
 # NOTE: Maximum limit of time spent for a learner on a date is 45 minutes/ 2700 seconds.
 def get_overall_time_taken(
-    time_taken_df, from_date: str, to_date: str, school: str, grade: str, operation: str
+    time_taken_df,
+    from_date: str,
+    to_date: str,
+    school: str,
+    grade: str,
+    operation: str,
+    tenant: str,
 ):
     """
     This function calculates the overall time taken by all learners.
@@ -887,6 +1082,10 @@ def get_overall_time_taken(
     # Apply operation filter if 'operation' is provided
     if operation:
         time_taken_df = time_taken_df[time_taken_df["operation"] == operation]
+
+    # Apply tenant filter if 'tenant' is provided
+    if tenant:
+        time_taken_df = time_taken_df[time_taken_df["tenant_name"] == tenant]
 
     # Check if DataFrame is empty after operation filter
     if time_taken_df.empty:
@@ -922,7 +1121,7 @@ def get_overall_time_taken(
 
 # - Time taken/spent by learners on the digital app in that week.
 def get_total_time_taken(
-    all_learners_data, from_date, to_date, school, grade, operation
+    all_learners_data, from_date, to_date, school, grade, operation, tenant
 ):
     """
     This function calculates the total time taken by learners on the digital app
@@ -931,7 +1130,7 @@ def get_total_time_taken(
     """
     # Fetch overall time taken
     overall_time_taken = get_overall_time_taken(
-        all_learners_data, from_date, to_date, school, grade, operation
+        all_learners_data, from_date, to_date, school, grade, operation, tenant
     )
 
     # Create a copy of all learners data to work with
@@ -956,6 +1155,10 @@ def get_total_time_taken(
     # Apply operation filter if 'operation' is provided
     if operation:
         total_time_df = total_time_df[total_time_df["operation"] == operation]
+
+    # Apply tenant filter if 'tenant' is provided
+    if tenant:
+        total_time_df = total_time_df[total_time_df["tenant_name"] == tenant]
 
     if not total_time_df.empty:
         # Calculate max and min timestamp of learners on every date
@@ -1079,7 +1282,13 @@ def avg_time_taken_per_learner(
 # - It will signify the minimum/maximum number of correctness performed by half of the learners.
 # - At overall level, It represents the median of accuracies of all learners on the data attempted till now.
 def get_overall_median_accuracy(
-    accuracy_df, from_date: str, to_date: str, school: str, grade: str, operation: str
+    accuracy_df,
+    from_date: str,
+    to_date: str,
+    school: str,
+    grade: str,
+    operation: str,
+    tenant: str,
 ):
     # Create a copy of the all_learners_data DataFrame to work with
     # accuracy_df = all_learners_data.copy()
@@ -1105,6 +1314,11 @@ def get_overall_median_accuracy(
     if operation:
         # Filter the DataFrame to include only records of the specified operation
         accuracy_df = accuracy_df[accuracy_df["operation"] == operation]
+
+    # Apply tenant filter if 'tenant' is provided
+    if tenant:
+        # Filter the DataFrame to include only records of the specified 'tenant'
+        accuracy_df = accuracy_df[accuracy_df["tenant_name"] == tenant]
 
     # Check if DataFrame is empty after all filters
     if accuracy_df.empty:
@@ -1135,11 +1349,11 @@ def get_overall_median_accuracy(
 
 # - At week wise level, It represents the median of accuracies of all learners on the data attempted in that week.
 def get_median_accuracy(
-    all_learners_data, from_date, to_date, school, grade, operation
+    all_learners_data, from_date, to_date, school, grade, operation, tenant
 ):
     # Fetch the overall median accuracy of learners
     overall_median_accuracy = get_overall_median_accuracy(
-        all_learners_data, from_date, to_date, school, grade, operation
+        all_learners_data, from_date, to_date, school, grade, operation, tenant
     )
 
     # Create a copy of the all learners data DataFrame to work with
@@ -1173,6 +1387,13 @@ def get_median_accuracy(
         # Filter the DataFrame to include only records of the specified 'operation'
         median_accuracy_df = median_accuracy_df[
             median_accuracy_df["operation"] == operation
+        ]
+
+    # Apply tenant filter if 'tenant' is provided
+    if tenant:
+        # Filter the DataFrame to include only records of the specified 'tenant'
+        median_accuracy_df = median_accuracy_df[
+            median_accuracy_df["tenant_name"] == tenant
         ]
 
     # Check if the DataFrame is not empty after all filters
@@ -1238,7 +1459,7 @@ def get_median_accuracy(
 
 
 def get_median_time_for_grade_jump(
-    all_learners_data, from_date, to_date, school, grade, operation
+    all_learners_data, from_date, to_date, school, grade, operation, tenant
 ):
     # Create a copy of the grade jump data to work with
     grade_jump_df = get_grade_jump_data(all_learners_data)
@@ -1255,6 +1476,10 @@ def get_median_time_for_grade_jump(
     # Filter the data for the selected operation if specified
     if operation:
         grade_jump_df = grade_jump_df[grade_jump_df["operation"] == operation]
+
+    # Filter the data for the selected tenant if specified
+    if tenant:
+        grade_jump_df = grade_jump_df[grade_jump_df["tenant_name"] == tenant]
 
     if not grade_jump_df.empty:
         # Calculate the total time in seconds taken by a learner on a qset-grade of an operation
@@ -1346,7 +1571,7 @@ def get_median_time_for_grade_jump(
         grd_wise_overall_median_time["previous_grade_time"] = np.nan
 
     # Sort qset-grades based on their priority order
-    grades_ls = get_data(ALL_GRADES_KEY).sort_values(by="id")["grade"]
+    grades_ls = get_grades_list().sort_values(by="id")["grade"]
     grd_wise_overall_median_time = grd_wise_overall_median_time.reindex(
         grades_ls, fill_value=pd.NA
     )
@@ -1521,7 +1746,7 @@ def get_median_time_for_grade_jump(
 
 
 def get_median_time_for_operation_jump(
-    all_learners_data, from_date, to_date, school, grade
+    all_learners_data, from_date, to_date, school, grade, tenant
 ):
     """
     This function calculates the median time taken for an operation jump across all operations and grades.
@@ -1537,6 +1762,9 @@ def get_median_time_for_operation_jump(
     # Filters data of selected grade
     if grade:
         operator_jump_df = operator_jump_df[operator_jump_df["grade"] == grade]
+    # Filters data of selected tenant
+    if tenant:
+        operator_jump_df = operator_jump_df[operator_jump_df["tenant_name"] == tenant]
 
     if not operator_jump_df.empty:
         # Calculate time in seconds taken by a learner on an operation
@@ -1765,6 +1993,7 @@ def get_learners_metrics_data(
     school: str,
     grade: str,
     operation: str,
+    tenant: str,
 ):
     """
     Fetches learners' proficiency data and calculates various metrics such as unique learners, new learners added, sessions count, work done, and time taken for grade and operation jumps.
@@ -1809,7 +2038,7 @@ def get_learners_metrics_data(
     # Calculate unique learners, weekly unique learners count, and final unique learners DataFrame
     overall_unique_learners, weekly_uni_lrs_cnt_table, final_unique_learners_df = (
         get_unique_learners(
-            all_learners_data_df, from_date, to_date, school, grade, operation
+            all_learners_data_df, from_date, to_date, school, grade, operation, tenant
         )
     )
 
@@ -1819,16 +2048,22 @@ def get_learners_metrics_data(
         final_unique_learners_df, previous_learners_list
     )
 
+    """ LOGGED IN USERS LOGIC """
+    # Calculate logged in users, weekly logged in users count, and logged in users DataFrame
+    overall_logged_in_users, weekly_logged_in_users_cnt_table = get_logged_in_users(
+        from_date, to_date, school, grade, tenant
+    )
+
     """ SESSIONS COUNT LOGIC"""
     # Calculate overall sessions and weekly sessions count
     overall_sessions, weekly_sessions_cnt_table = get_sessions(
-        all_learners_data_df, from_date, to_date, school, grade
+        all_learners_data_df, from_date, to_date, school, grade, tenant
     )
 
     """ WORK DONE LOGIC"""
     # Calculate overall work done, weekly work done, and work done DataFrame
     overall_work_done, weekly_work_done, work_done_df = get_work_done(
-        all_learners_data_df, from_date, to_date, school, grade, operation
+        all_learners_data_df, from_date, to_date, school, grade, operation, tenant
     )
 
     """ WORK DONE PER LEARNER LOGIC"""
@@ -1846,7 +2081,7 @@ def get_learners_metrics_data(
     """ TOTAL TIME TAKEN LOGIC """
     # Calculate overall time taken, weekly total time, and total time DataFrame
     overall_time_taken, weekly_total_time, total_time_df = get_total_time_taken(
-        all_learners_data_df, from_date, to_date, school, grade, operation
+        all_learners_data_df, from_date, to_date, school, grade, operation, tenant
     )
 
     """ AVERAGE TIME PER LEARNER LOGIC"""
@@ -1859,7 +2094,7 @@ def get_learners_metrics_data(
 
     # Calculate median accuracy of learners
     overall_median_accuracy, weekly_median_accuracy = get_median_accuracy(
-        all_learners_data_df, from_date, to_date, school, grade, operation
+        all_learners_data_df, from_date, to_date, school, grade, operation, tenant
     )
 
     """ MEDIAN TIME TAKEN FOR GRADE JUMP """
@@ -1867,7 +2102,7 @@ def get_learners_metrics_data(
     # Calculate median time taken for grade jump
     overall_median_grade_jump_time, weekly_grade_jump_median_time = (
         get_median_time_for_grade_jump(
-            all_learners_data_df, from_date, to_date, school, grade, operation
+            all_learners_data_df, from_date, to_date, school, grade, operation, tenant
         )
     )
 
@@ -1875,7 +2110,7 @@ def get_learners_metrics_data(
     # Calculate median time taken for operator jump
     overall_median_operator_jump_time, weekly_operator_jump_median_time = (
         get_median_time_for_operation_jump(
-            all_learners_data_df, from_date, to_date, school, grade
+            all_learners_data_df, from_date, to_date, school, grade, tenant
         )
     )
 
@@ -1884,6 +2119,7 @@ def get_learners_metrics_data(
         [
             overall_unique_learners,
             pd.DataFrame([{"overall_count": None}]),
+            overall_logged_in_users,
             overall_sessions,
             overall_time_taken,
             overall_time_taken_avg,
@@ -1900,6 +2136,7 @@ def get_learners_metrics_data(
         [
             weekly_uni_lrs_cnt_table,
             weekly_new_learners_added,
+            weekly_logged_in_users_cnt_table,
             weekly_sessions_cnt_table,
             weekly_total_time,
             weekly_time_taken_per_lr,
@@ -1930,6 +2167,7 @@ def get_learners_metrics_data(
     Output("dig-lpm-dates-picker", "max_date_allowed"),
     Output("dig-lpm-schools-dropdown", "options"),
     Output("dig-lpm-grades-dropdown", "options"),
+    Output("dig-lpm-tenants-dropdown", "options"),
     Output("dig-ll-schools-dropdown", "options"),
     Output("dig-ll-grades-dropdown", "options"),
     Output("dig-ll-qset-purpose-dropdown", "options"),
@@ -1941,6 +2179,7 @@ def get_learners_metrics_data(
     Input("dig-lpm-schools-dropdown", "value"),
     Input("dig-lpm-grades-dropdown", "value"),
     Input("dig-lpm-operations-dropdown", "value"),
+    Input("dig-lpm-tenants-dropdown", "value"),
 )
 def update_table(
     start_date,
@@ -1948,8 +2187,9 @@ def update_table(
     selected_school,
     selected_grade,
     selected_operation,
+    selected_tenant,
 ):
-    all_learners_data = get_data(ALL_LEARNER_DATA_KEY)
+    all_learners_data = get_all_learners_data_df()
 
     print("What about here")
 
@@ -1961,6 +2201,7 @@ def update_table(
         selected_school,
         selected_grade,
         selected_operation,
+        selected_tenant,
     )
 
     # Adjust start_date and end_date if not provided to default to the last 5 weeks
@@ -1992,7 +2233,7 @@ def update_table(
                 },
                 "backgroundColor": "#CDD6DF",
             }
-            for index in [1, 2, 3, 4, 10, 11, 12, 13, 14, 16, 17, 18]
+            for index in [1, 2, 3, 4, 11, 12, 13, 14, 15, 17, 18, 19]
         ),
         *(
             {
@@ -2013,17 +2254,18 @@ def update_table(
     min_date_allowed = get_min_max_timestamp("min").date()
     max_date_allowed = get_min_max_timestamp("max").date()
     school_options = [
-        {"label": school, "value": school} for school in get_data(ALL_SCHOOLS_KEY)
+        {"label": school, "value": school} for school in get_schools_list()
     ]
     grades_options = [
         {"label": school_grade, "value": school_grade}
-        for school_grade in get_data(ALL_GRADES_KEY)
-        .sort_values(by="id")["grade"]
-        .unique()
+        for school_grade in get_grades_list().sort_values(by="id")["grade"].unique()
     ]
     qset_type_options = [
-        {"label": qset_type, "value": qset_type}
-        for qset_type in get_data(ALL_QSET_TYPES_KEY)
+        {"label": qset_type, "value": qset_type} for qset_type in get_qset_types_list()
+    ]
+
+    tenant_options = [
+        {"label": tenant, "value": tenant} for tenant in get_tenants_list()
     ]
 
     return (
@@ -2036,6 +2278,7 @@ def update_table(
         max_date_allowed,
         school_options,
         grades_options,
+        tenant_options,
         school_options,
         grades_options,
         qset_type_options,
@@ -2113,7 +2356,7 @@ def update_learners_list_table(
     parent_grade,
     parent_operation,
 ):
-    all_learners_data = get_data(ALL_LEARNER_DATA_KEY)
+    all_learners_data = get_all_learners_data_df()
     print("Updating learners list table")
 
     # Initialize the learners attempt table data and other variables
@@ -2301,7 +2544,7 @@ def update_learner_info_table(
     operation,
     qset_types,
 ):
-    all_learners_data = get_data(ALL_LEARNER_DATA_KEY)
+    all_learners_data = get_all_learners_data_df()
     all_learners_data.drop(columns=["sequence"], inplace=True)
 
     # Initialize the learners performance data and other variables
@@ -2499,6 +2742,12 @@ layout = html.Div(
                         ]
                     ],
                     placeholder="Select Operation",
+                    style={"width": "300px", "margin": "10px"},
+                ),
+                # Dropdown for selecting tenants
+                dcc.Dropdown(
+                    id="dig-lpm-tenants-dropdown",
+                    placeholder="Select Tenant",
                     style={"width": "300px", "margin": "10px"},
                 ),
             ],

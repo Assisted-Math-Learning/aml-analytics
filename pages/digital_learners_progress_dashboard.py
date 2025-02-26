@@ -3,11 +3,11 @@ import pandas as pd
 from dash import Dash, dash_table, dcc, html, Input, Output, callback
 
 from db_utils import (
-    ALL_GRADES_KEY,
-    ALL_SCHOOLS_KEY,
     LAST_QUESTION_PER_QSET_GRADE_KEY,
     get_data,
+    get_grades_list,
     get_non_diagnostic_data,
+    get_schools_list,
 )
 
 # Register the page
@@ -97,7 +97,9 @@ target_grade_map = {
 )
 def update_table(selected_school):
     non_diagnostic_data = get_non_diagnostic_data()
+    print("Non diagnostic data", non_diagnostic_data.head(1))
     last_question_per_qset_grade = get_data(LAST_QUESTION_PER_QSET_GRADE_KEY)
+    print("Last question per qset grade", last_question_per_qset_grade.head(1))
     # Map question set last question to learners attempt data
     # It is done to know whether the learner has attempted the last question of that qset or not.
     # Based, on that the learner we'll be able to know that whether the learner has solved the last qset of that qset grade or not.
@@ -137,7 +139,7 @@ def update_table(selected_school):
     ].map(operations_priority)
 
     # Fetch grades
-    grades = get_data(ALL_GRADES_KEY)
+    grades = get_grades_list()
     # Map grades to their priorities for sorting
     grades_priority = grades.set_index("grade").to_dict().get("id")
 
@@ -254,7 +256,7 @@ def update_table(selected_school):
 
     # Schools Dropdown Options
     school_options = [
-        {"label": school, "value": school} for school in get_data(ALL_SCHOOLS_KEY)
+        {"label": school, "value": school} for school in get_schools_list()
     ]
 
     return final_df.to_dict("records"), school_options
