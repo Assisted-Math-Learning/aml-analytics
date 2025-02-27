@@ -2165,6 +2165,7 @@ def get_learners_metrics_data(
     Output("last-record-updated-at", "children"),
     Output("dig-lpm-dates-picker", "min_date_allowed"),
     Output("dig-lpm-dates-picker", "max_date_allowed"),
+    Output("dig-lpm-dates-picker", "initial_visible_month"),
     Output("dig-lpm-schools-dropdown", "options"),
     Output("dig-lpm-grades-dropdown", "options"),
     Output("dig-lpm-tenants-dropdown", "options"),
@@ -2276,6 +2277,7 @@ def update_table(
         last_record_updated_at_str,
         min_date_allowed,
         max_date_allowed,
+        max_date_allowed,
         school_options,
         grades_options,
         tenant_options,
@@ -2343,6 +2345,7 @@ def update_selected_dates(start_date, end_date):
     Input("dig-lpm-schools-dropdown", "value"),
     Input("dig-lpm-grades-dropdown", "value"),
     Input("dig-lpm-operations-dropdown", "value"),
+    Input("dig-lpm-tenants-dropdown", "value"),
 )
 def update_learners_list_table(
     active_cell,
@@ -2355,6 +2358,7 @@ def update_learners_list_table(
     parent_school,
     parent_grade,
     parent_operation,
+    parent_tenant,
 ):
     all_learners_data = get_all_learners_data_df()
     print("Updating learners list table")
@@ -2415,6 +2419,13 @@ def update_learners_list_table(
                     learners_attempts_data["updated_at"].dt.date <= to_date_dt
                 ]
 
+            # Apply tenant filters if the tenant is selected
+            if parent_tenant:
+                learners_attempts_data = learners_attempts_data[
+                    learners_attempts_data["tenant_name"] == parent_tenant
+                ]
+
+            # Apply school filters if the school is selected
             if selected_school:
                 learners_attempts_data = learners_attempts_data[
                     learners_attempts_data["school"] == selected_school
@@ -2716,7 +2727,7 @@ layout = html.Div(
                         "cursor": "pointer",
                     },
                 ),
-                dcc.DatePickerRange(id="dig-lpm-dates-picker"),
+                dcc.DatePickerRange(id="dig-lpm-dates-picker", minimum_nights=0),
                 # Dropdown for selecting school
                 dcc.Dropdown(
                     id="dig-lpm-schools-dropdown",
