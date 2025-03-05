@@ -17,8 +17,6 @@ import pytz
 import re
 from dash import Dash, Input, Output, State, callback, dash_table, dcc, html, no_update
 from datetime import datetime, timedelta
-import psutil
-import os
 
 
 # Register the page
@@ -123,7 +121,6 @@ def get_all_learners_options(school: str = ""):
     Input("dig-li-schools-dropdown", "value"),
 )
 def update_learners_options(selected_school: str):
-    print("Master Dashboard: learners have been called")
     """Update the options for the learners dropdown based on selected school."""
     all_learners = (
         get_all_learners_options(selected_school)
@@ -134,9 +131,6 @@ def update_learners_options(selected_school: str):
 
 
 # Learners data is basically the data of all learners attempts of all their question-sets and their questions
-
-
-print("I am here")
 
 
 # Create Grade Jump Data
@@ -213,11 +207,6 @@ def get_grade_jump_data():
         grade_jump_data.loc[:, "grade_order"] = grade_jump_data["qset_grade"].map(
             grades_priority
         )
-
-    process = psutil.Process(os.getpid())
-    print(
-        f"Master Dashboard: In get_grade_jump_data: {process.memory_info().rss / (1024 * 1024)} MB"
-    )
     return grade_jump_data
 
 
@@ -276,11 +265,6 @@ def get_operator_jump_data():
             "operation"
         ].map(operations_priority)
 
-    process = psutil.Process(os.getpid())
-    print(
-        f"Master Dashboard: In get_operator_jump_data: {process.memory_info().rss / (1024 * 1024)} MB"
-    )
-
     return operator_jump_data
 
 
@@ -302,7 +286,6 @@ def get_operator_jump_data():
 def get_overall_unique_learners(uni_learners_df, from_date: str, to_date: str):
     # Create a copy of the all_learners_data DataFrame
     # uni_learners_df = all_learners_data.copy()
-    print("Shape of unique_learners: ", uni_learners_df.shape)
 
     # Filter the DataFrame based on the provided date range if both from_date and to_date are provided
     if from_date and to_date:
@@ -334,11 +317,6 @@ def get_overall_unique_learners(uni_learners_df, from_date: str, to_date: str):
     overall_uni_learners_df = pd.concat(
         [overall_count_df, op_wise_uni_learners_df]
     ).reset_index(drop=True)
-
-    process = psutil.Process(os.getpid())
-    print(
-        f"Master Dashboard: In get_overall_unique_learners: {process.memory_info().rss / (1024 * 1024)} MB"
-    )
 
     return overall_uni_learners_df
 
@@ -473,11 +451,6 @@ def get_unique_learners(from_date, to_date, school, grade, operation, tenant):
         final_unique_learners_df, previous_learners_list
     )
 
-    process = psutil.Process(os.getpid())
-    print(
-        f"Master Dashboard: In get_unique_learners: {process.memory_info().rss / (1024 * 1024)} MB"
-    )
-
     return overall_unique_learners, weekly_uni_lrs_cnt_table, weekly_new_learners_added
 
 
@@ -517,11 +490,6 @@ def get_new_learners_added(learners_added_df, previous_learners_list):
         values="new learners added", columns="week_range", observed=True
     ).reset_index(names=["metrics"])
 
-    process = psutil.Process(os.getpid())
-    print(
-        f"Master Dashboard: In get_new_learners_added: {process.memory_info().rss / (1024 * 1024)} MB"
-    )
-
     return weekly_new_learners_added
 
 
@@ -545,11 +513,6 @@ def get_overall_logged_in_users(logged_in_users_df, from_date: str, to_date: str
     overall_count = logged_in_users_df["learner_id"].count()
     # Create a DataFrame to hold the overall count
     overall_count_df = pd.DataFrame([{"overall_count": overall_count}])
-
-    process = psutil.Process(os.getpid())
-    print(
-        f"Master Dashboard: In get_overall_logged_in_users: {process.memory_info().rss / (1024 * 1024)} MB"
-    )
 
     return overall_count_df
 
@@ -646,11 +609,6 @@ def get_logged_in_users(
             {"metrics": ["logged in learners"]}
         )
 
-    process = psutil.Process(os.getpid())
-    print(
-        f"Master Dashboard: In get_logged_in_users: {process.memory_info().rss / (1024 * 1024)} MB"
-    )
-
     # Return the logged in users count, weekly logged in users count, and the logged in users DataFrame
     return overall_logged_in_users, weekly_logged_in_users_cnt_table
 
@@ -702,10 +660,6 @@ def get_overall_sessions(uni_sessions_df, from_date: str, to_date: str):
             # Create the final result as a DataFrame with the overall count
             overall_count_df = pd.DataFrame([{"overall_count": overall_count}])
 
-    process = psutil.Process(os.getpid())
-    print(
-        f"Master Dashboard: In get_overall_sessions: {process.memory_info().rss / (1024 * 1024)} MB"
-    )
     # Return the DataFrame containing the overall count of sessions
     return overall_count_df
 
@@ -784,10 +738,6 @@ def get_sessions(from_date, to_date, school, grade, tenant):
         # If the DataFrame is empty after filtering, return a DataFrame with a single column 'metrics'
         weekly_sessions_cnt_table = pd.DataFrame({"metrics": ["sessions"]})
 
-    process = psutil.Process(os.getpid())
-    print(
-        f"Master Dashboard: In get_sessions: {process.memory_info().rss / (1024 * 1024)} MB"
-    )
     return overall_sessions, weekly_sessions_cnt_table
 
 
@@ -821,10 +771,6 @@ def get_overall_work_done(work_done_df, from_date: str, to_date: str):
         # Create a DataFrame to hold the overall count
         overall_count_df = pd.DataFrame([{"overall_count": overall_count}])
 
-    process = psutil.Process(os.getpid())
-    print(
-        f"Master Dashboard: In get_overall_work_done: {process.memory_info().rss / (1024 * 1024)} MB"
-    )
     # Return the DataFrame containing the overall count
     return overall_count_df
 
@@ -931,10 +877,6 @@ def get_work_done(
         get_median_work_done_per_learner(work_done_data.copy())
     )
 
-    process = psutil.Process(os.getpid())
-    print(
-        f"Master Dashboard: In get_work_done: {process.memory_info().rss / (1024 * 1024)} MB"
-    )
     # Return the overall work done, weekly work done, and the filtered DataFrame
     return (
         overall_work_done,
@@ -1003,10 +945,7 @@ def get_avg_work_done_per_learner(
     else:
         # If the DataFrame is empty, create a DataFrame with a single column 'metrics' containing 'work done per learner'
         weekly_work_done_per_lr = pd.DataFrame({"metrics": ["work done per learner"]})
-    process = psutil.Process(os.getpid())
-    print(
-        f"Master Dashboard: In get_work_done_per_lr: {process.memory_info().rss / (1024 * 1024)} MB"
-    )
+
     # Return the overall average work done per learner and the weekly average work done per learner
     return overall_work_done_avg, weekly_work_done_per_lr
 
@@ -1067,10 +1006,7 @@ def get_median_work_done_per_learner(work_done_per_learner_df):
         weekly_median_work_done = pd.DataFrame(
             {"metrics": ["Median Work Done Per Learner"]}
         )
-    process = psutil.Process(os.getpid())
-    print(
-        f"Master Dashboard: In get_median_work_done_per_lr: {process.memory_info().rss / (1024 * 1024)} MB"
-    )
+
     # Return the overall median work done per learner and the weekly median work done per learner
     return overall_median_work_done, weekly_median_work_done
 
@@ -1125,10 +1061,6 @@ def get_overall_time_taken(time_taken_df, from_date: str, to_date: str):
         # Sum up the time difference and convert to minutes
         total_time_taken = round(time_taken_df_grouped["time_diff"].sum() / 60, 2)
 
-    process = psutil.Process(os.getpid())
-    print(
-        f"Master Dashboard: In overall_total_time_taken: {process.memory_info().rss / (1024 * 1024)} MB"
-    )
     # Return the overall time taken as a DataFrame
     return pd.DataFrame([{"overall_count": total_time_taken}])
 
@@ -1241,12 +1173,6 @@ def get_total_time_taken(
     overall_time_taken_avg, weekly_time_taken_per_lr = avg_time_taken_per_learner(
         time_taken_data, overall_time_taken, overall_unique_learners
     )
-
-    process = psutil.Process(os.getpid())
-    print(
-        f"Master Dashboard: In total_time_taken: {process.memory_info().rss / (1024 * 1024)} MB"
-    )
-
     return (
         overall_time_taken,
         weekly_total_time,
@@ -1323,10 +1249,6 @@ def avg_time_taken_per_learner(
             {"metrics": ["average time spent per learner (in min)"]}
         )
 
-    process = psutil.Process(os.getpid())
-    print(
-        f"Master Dashboard: In get_time_taken_per_lr: {process.memory_info().rss / (1024 * 1024)} MB"
-    )
     # Return the overall average time taken per learner and the weekly average time taken per learner
     return overall_time_taken_avg, weekly_time_taken_per_lr
 
@@ -1365,10 +1287,6 @@ def get_overall_median_accuracy(accuracy_df, from_date: str, to_date: str):
         # Set result in 'median_accuracy_df'
         median_accuracy_df = accuracy_df_grouped[["learner_id", "accuracy"]]
 
-    process = psutil.Process(os.getpid())
-    print(
-        f"Master Dashboard: In get_overall_median_accuracy: {process.memory_info().rss / (1024 * 1024)} MB"
-    )
     # Return a DataFrame containing the median accuracy
     # This is done by calculating the median of 'accuracy' in 'median_accuracy_df' and rounding it to 2 decimal places
     return pd.DataFrame(
@@ -1482,10 +1400,6 @@ def get_median_accuracy(from_date, to_date, school, grade, operation, tenant):
             {"metrics": ["Median Accuracy Of Learners"]}
         )
 
-    process = psutil.Process(os.getpid())
-    print(
-        f"Master Dashboard: In get_median_accuracy: {process.memory_info().rss / (1024 * 1024)} MB"
-    )
     # Return the overall median accuracy and the weekly median accuracy
     return overall_median_accuracy, weekly_median_accuracy
 
@@ -1779,10 +1693,6 @@ def get_median_time_for_grade_jump(
     # Remove NaN values from the weekly_grade_jump_median_time DataFrame
     weekly_grade_jump_median_time.replace("nan (nan)", "", inplace=True)
 
-    process = psutil.Process(os.getpid())
-    print(
-        f"Master Dashboard: In get_grade_jump_median_time: {process.memory_info().rss / (1024 * 1024)} MB"
-    )
     return overall_median_grade_jump_time, weekly_grade_jump_median_time
 
 
@@ -2053,10 +1963,6 @@ def get_median_time_for_operation_jump(from_date, to_date, school, grade, tenant
     weekly_operator_jump_median_time = pd.concat(
         [weekly_operator_jump_median_time, operator_wise_weekly_median_time]
     )
-    process = psutil.Process(os.getpid())
-    print(
-        f"Master Dashboard: In get_median_time_for_operation_jump {process.memory_info().rss / (1024 * 1024)} MB"
-    )
     return overall_median_operator_jump_time, weekly_operator_jump_median_time
 
 
@@ -2187,16 +2093,10 @@ def get_learners_metrics_data(
     weekly_metrics_df["metrics"] = weekly_metrics_df["metrics"].str.title()
     final_table_df = pd.concat([overall_count_df, weekly_metrics_df], axis=1)
 
-    process = psutil.Process(os.getpid())
-    print(
-        f"Master Dashboard: In get_learners_metrics_data: {process.memory_info().rss / (1024 * 1024)} MB"
-    )
-
     return final_table_df
 
 
 def get_school_options():
-    print("Master Dashboard: school have been called")
     # Get the list of schools from the database
     school_options = [
         {"label": school, "value": school} for school in get_schools_list()
@@ -2205,7 +2105,6 @@ def get_school_options():
 
 
 def get_grade_options():
-    print("Master Dashboard: grade have been called")
     # Get the list of grades from the database
     grade_options = [
         {"label": grade, "value": grade}
@@ -2215,7 +2114,6 @@ def get_grade_options():
 
 
 def get_qset_type_options():
-    print("Master Dashboard: qset type have been called")
     # Get the list of qset types from the database
     qset_type_options = [
         {"label": qset_type, "value": qset_type} for qset_type in get_qset_types_list()
@@ -2224,7 +2122,6 @@ def get_qset_type_options():
 
 
 def get_tenant_options():
-    print("Master Dashboard: tenant have been called")
     # Get the list of tenants from the database
     tenant_options = [
         {"label": tenant, "value": tenant} for tenant in get_tenants_list()
@@ -2257,7 +2154,6 @@ def update_table(
     selected_operation,
     selected_tenant,
 ):
-    print("What about here")
 
     current_date = datetime.today()
     # Determine the date range for calculation
@@ -2319,11 +2215,6 @@ def update_table(
     last_record_updated_at_str = f"Last Record Updated At: {datetime.fromisoformat(get_min_max_timestamp('max')).astimezone(IST).strftime('%d %b %Y %H:%M')}"
     min_date_allowed = datetime.fromisoformat(get_min_max_timestamp("min")).date()
     max_date_allowed = datetime.fromisoformat(get_min_max_timestamp("max")).date()
-
-    process = psutil.Process(os.getpid())
-    print(
-        f"Master Dashboard: In Main Table Memory Usage: {process.memory_info().rss / (1024 * 1024)} MB"
-    )
 
     return (
         filtered_data.to_dict("records"),
@@ -2451,7 +2342,6 @@ def update_learners_list_table(
                 ]
             ]
 
-            print("Master Dashboard: Updating learners list table")
             # Filter the learners attempts data based on the operation
             learners_attempts_data = all_learners_data[
                 all_learners_data["operation"] == operation
@@ -2595,10 +2485,6 @@ def update_learners_list_table(
                         learner_username_mapping
                     )
                 )
-    process = psutil.Process(os.getpid())
-    print(
-        f"Master Dashboard: In Learner List Table Memory Usage: {process.memory_info().rss / (1024 * 1024)} MB"
-    )
     # Return the learners attempt table data, hidden flag, and selected filters
     return learners_attempt_table_data.to_dict("records"), hidden, selected_filters
 
@@ -2767,10 +2653,6 @@ def update_learner_info_table(
                 learners_perf_data.loc[
                     learners_perf_data.index[-1] :, "attempted_date"
                 ] = "in progress"
-    process = psutil.Process(os.getpid())
-    print(
-        f"Master Dashboard: In Learner Info Table Memory Usage: {process.memory_info().rss / (1024 * 1024)} MB"
-    )
     return learners_perf_data.to_dict("records"), hidden, heading
 
 

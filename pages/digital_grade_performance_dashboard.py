@@ -1,7 +1,5 @@
 import dash
 import pandas as pd
-import os
-import psutil
 
 from dash import Dash, Input, Output, callback, dash_table, dcc, html
 
@@ -46,7 +44,6 @@ grade_color_coding = {
 
 
 def get_repo_options():
-    print("Digital Grade Performance Dashboard: repo have been called")
     # Get the list of repositories from the database
     repo_options = [
         {"label": repo, "value": repo} for repo in get_repository_names_list()
@@ -55,7 +52,6 @@ def get_repo_options():
 
 
 def get_qset_type_options():
-    print("Digital Grade Performance Dashboard: qset type have been called")
     # Get the list of qset types from the database
     qset_type_options = [
         {"label": qset_type, "value": qset_type} for qset_type in get_qset_types_list()
@@ -135,10 +131,6 @@ def update_table(selected_repo, selected_sheet_type):
         inplace=True,
     )
 
-    process = psutil.Process(os.getpid())
-    print(
-        f"Digital Grade Performance Dashboard Memory Usage: {process.memory_info().rss / (1024 * 1024)} MB"
-    )
     # Return the final dataframe as a dictionary for the Dash DataTable
     return final_df.to_dict("records")
 

@@ -1,7 +1,5 @@
 import dash
-import os
 import pandas as pd
-import psutil
 from dash import Dash, dash_table, dcc, html, Input, Output, callback
 from db_utils import (
     get_last_question_per_qset_grade_df,
@@ -75,7 +73,6 @@ target_grade_map = {
 
 
 def get_school_options():
-    print("Digital Learner Progress Dashboard: school have been called")
     # Get the list of schools from the database
     school_options = [
         {"label": school, "value": school} for school in get_schools_list()
@@ -218,11 +215,6 @@ def update_table(selected_school):
         by=["operation_order", "starting_grade_order", "target_grade_order"],
         ascending=[True, True, True],
         inplace=True,
-    )
-
-    process = psutil.Process(os.getpid())
-    print(
-        f"Digital Learner Progress Dashboard Memory Usage: {process.memory_info().rss / (1024 * 1024)} MB"
     )
 
     return final_df.to_dict("records")

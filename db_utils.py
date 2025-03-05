@@ -491,7 +491,6 @@ def get_l3_skills_list():
 
 def get_schools_list():
     schools = get_data(ALL_SCHOOLS_KEY)
-    print(schools)
     return schools["school_name"].sort_values().unique()
 
 
@@ -513,7 +512,6 @@ def get_grades_list():
 
 # Minimum - Maximum Learners Data Timestamp
 def get_min_max_timestamp(key):
-    print("Fetching get_min_max_timestamp")
     # Minimum - Maximum Date
     min_timestamp = (
         get_data(MIN_TIME_KEY).decode("utf-8")
@@ -532,7 +530,6 @@ def get_min_max_timestamp(key):
 
 
 def last_synced_time():
-    print("Fetching last_synced_time")
     last_synced_at = get_data(LAST_FETCHED_TIME_KEY)
 
     return last_synced_at.decode("utf-8")

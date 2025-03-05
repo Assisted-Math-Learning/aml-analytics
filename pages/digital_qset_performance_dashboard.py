@@ -1,7 +1,5 @@
 import dash
 import pandas as pd
-import os
-import psutil
 
 from dash import Dash, Input, Output, callback, dash_table, dcc, html
 
@@ -117,7 +115,6 @@ def get_question_set_data(
 
 
 def get_repo_options():
-    print("Digital QSet Performance Dashboard: repo have been called")
     # Get the list of repositories from the database
     repo_options = [
         {"label": repo, "value": repo} for repo in get_repository_names_list()
@@ -126,7 +123,6 @@ def get_repo_options():
 
 
 def get_qset_type_options():
-    print("Digital QSet Performance Dashboard: qset type have been called")
     # Get the list of qset types from the database
     qset_type_options = [
         {"label": qset_type, "value": qset_type} for qset_type in get_qset_types_list()
@@ -135,7 +131,6 @@ def get_qset_type_options():
 
 
 def get_l2_skill_options():
-    print("Digital QSet Performance Dashboard: l2 skill have been called")
     # Get the list of l2 skills from the database
     l2_skill_options = [
         {"label": l2_skill, "value": l2_skill}
@@ -146,7 +141,6 @@ def get_l2_skill_options():
 
 
 def get_l3_skill_options():
-    print("Digital QSet Performance Dashboard: l3 skill have been called")
     # Get the list of l3 skills from the database
     l3_skill_options = [
         {"label": l3_skill, "value": l3_skill}
@@ -325,11 +319,6 @@ def update_table(
         by=["operation_order", "qset_grade_order", "sequence"],
         ascending=[True, True, True],
         inplace=True,
-    )
-
-    process = psutil.Process(os.getpid())
-    print(
-        f"Digital QSet Performance Dashboard Memory Usage: {process.memory_info().rss / (1024 * 1024)} MB"
     )
 
     return final_df.to_dict("records")
