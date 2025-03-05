@@ -1,5 +1,7 @@
 import dash
 import pandas as pd
+import os
+import psutil
 
 from dash import Dash, Input, Output, callback, dash_table, dcc, html
 
@@ -43,10 +45,26 @@ grade_color_coding = {
 ###################################  Digital Grade Performance Dashboard Logic ###################################
 
 
+def get_repo_options():
+    print("Digital Grade Performance Dashboard: repo have been called")
+    # Get the list of repositories from the database
+    repo_options = [
+        {"label": repo, "value": repo} for repo in get_repository_names_list()
+    ]
+    return repo_options
+
+
+def get_qset_type_options():
+    print("Digital Grade Performance Dashboard: qset type have been called")
+    # Get the list of qset types from the database
+    qset_type_options = [
+        {"label": qset_type, "value": qset_type} for qset_type in get_qset_types_list()
+    ]
+    return qset_type_options
+
+
 @callback(
     Output("dig-qgp-data-table", "data"),
-    Output("dig-qgp-repo-dropdown", "options"),
-    Output("dig-qgp-qset-types-dropdown", "options"),
     Input("dig-qgp-repo-dropdown", "value"),
     Input("dig-qgp-qset-types-dropdown", "value"),
 )
@@ -64,7 +82,7 @@ def update_table(selected_repo, selected_sheet_type):
     # Group data based on score thresholds
     # It groups question set data by operation and grade, aggregating names of question sets with scores below 0.2 and above 0.9 into comma-separated strings.
     qset_data_based_on_score = (
-        qset_level_data.groupby(["operation", "qset_grade"])
+        qset_level_data.groupby(["operation", "qset_grade"], observed=True)
         .agg(
             qsets_score_less_than_20=(
                 "qset_name",
@@ -117,135 +135,138 @@ def update_table(selected_repo, selected_sheet_type):
         inplace=True,
     )
 
-    # Repository dropdown options
-    repo_options = [
-        {"label": repo, "value": repo} for repo in get_repository_names_list()
-    ]
-
-    # Qset type dropdown options
-    qset_type_options = [
-        {"label": qset_type, "value": qset_type} for qset_type in get_qset_types_list()
-    ]
-
+    process = psutil.Process(os.getpid())
+    print(
+        f"Digital Grade Performance Dashboard Memory Usage: {process.memory_info().rss / (1024 * 1024)} MB"
+    )
     # Return the final dataframe as a dictionary for the Dash DataTable
-    return final_df.to_dict("records"), repo_options, qset_type_options
+    return final_df.to_dict("records")
 
 
 ###################################  Digital Grade Performance Dashboard Layout ###################################
 
+
 # Define the layout of the Dash app
-layout = html.Div(
-    [
-        html.H1("Question-Set Grade Level Performance Dashboard"),
-        html.Div(
-            [
-                # Dropdown for selecting repository name
-                dcc.Dropdown(
-                    id="dig-qgp-repo-dropdown",
-                    placeholder="Select Repository",
-                    style={"width": "300px", "margin": "10px"},
-                ),
-                # Dropdown for selecting the question set type
-                dcc.Dropdown(
-                    id="dig-qgp-qset-types-dropdown",
-                    placeholder="Select Question Set Type",
-                    style={"width": "300px", "margin": "10px"},
-                ),
-            ],
-            style={
-                "display": "flex",
-                "justifyContent": "flex-start",  # Center items horizontally
-                "alignItems": "center",  # Align items vertically
-                "flexWrap": "wrap",  # Allow items to wrap to the next line if needed
-                "marginBottom": "10px",
-            },
-        ),
-        dcc.Loading(
-            id="dig-qgp-loading-table",
-            type="circle",
-            children=[
-                dash_table.DataTable(
-                    id="dig-qgp-data-table",
-                    columns=[
-                        {"name": "Operation", "id": "operation"},
-                        {"name": "Class", "id": "qset_grade"},
-                        {"name": "Attempt Count", "id": "attempts_count"},
-                        {"name": "Median Accuracy", "id": "median"},
-                        {"name": "Average Accuracy", "id": "avg"},
-                        {
-                            "name": "Difficult Question Sets",
-                            "id": "qsets_score_less_than_20",
-                        },
-                        {
-                            "name": "Easy Question Sets",
-                            "id": "qsets_score_more_than_90",
-                        },
-                    ],
-                    style_table={
-                        "overflowX": "auto",
-                        "overflowY": "auto",
-                        "maxWidth": "100%",
-                        "marginTop": "20px",
-                        "marginBottom": "50px",
-                        "maxHeight": "800px",
-                    },
-                    style_data={
-                        "whiteSpace": "nowrap",  # Allow content to wrap
-                        "overflow": "auto",  # Prevent cell expansion
-                        # "textOverflow": "ellipsis",  # Show ellipsis for trimmed content
-                        "minHeight": "100px",  # Limit cell height
-                        "textAlign": "center",
-                        "border": "1px solid black",
-                    },
-                    style_header={
-                        "fontWeight": "bold",
-                        "color": "black",
-                        "border": "1px solid #004494",
-                        "backgroundColor": "#A3C1E0",
-                        "whiteSpace": "normal",
-                        "height": "auto",
-                        "position": "sticky",
-                        "top": "0",
-                        "text-align": "center",
-                    },  # Sticky header
-                    style_cell={
-                        "textAlign": "center",
-                        "minWidth": "100px",
-                        "maxWidth": "150px",  # Fixed max width for cells
-                        "minHeight": "100px",  # Fixed height for cells
-                        "overflow": "auto",  # Scrollbars for overflow
-                        "whiteSpace": "nowrap",  # Allow line wrapping
-                    },
-                    style_data_conditional=[
-                        *(
+def grade_performance_layout():
+    return html.Div(
+        [
+            html.H1("Question-Set Grade Level Performance Dashboard"),
+            html.Div(
+                [
+                    # Dropdown for selecting repository name
+                    dcc.Dropdown(
+                        id="dig-qgp-repo-dropdown",
+                        placeholder="Select Repository",
+                        options=get_repo_options(),
+                        style={"width": "300px", "margin": "10px"},
+                    ),
+                    # Dropdown for selecting the question set type
+                    dcc.Dropdown(
+                        id="dig-qgp-qset-types-dropdown",
+                        placeholder="Select Question Set Type",
+                        options=get_qset_type_options(),
+                        style={"width": "300px", "margin": "10px"},
+                    ),
+                ],
+                style={
+                    "display": "flex",
+                    "justifyContent": "flex-start",  # Center items horizontally
+                    "alignItems": "center",  # Align items vertically
+                    "flexWrap": "wrap",  # Allow items to wrap to the next line if needed
+                    "marginBottom": "10px",
+                },
+            ),
+            dcc.Loading(
+                id="dig-qgp-loading-table",
+                type="circle",
+                children=[
+                    dash_table.DataTable(
+                        id="dig-qgp-data-table",
+                        columns=[
+                            {"name": "Operation", "id": "operation"},
+                            {"name": "Class", "id": "qset_grade"},
+                            {"name": "Attempt Count", "id": "attempts_count"},
+                            {"name": "Median Accuracy", "id": "median"},
+                            {"name": "Average Accuracy", "id": "avg"},
                             {
-                                "if": {
-                                    "filter_query": f"{{operation}} = '{operation}'",
-                                    "column_id": f"operation",
-                                },
-                                "backgroundColor": operation_color_coding[operation],
-                            }
-                            for operation in operation_color_coding.keys()
-                        ),
-                        *(
+                                "name": "Difficult Question Sets",
+                                "id": "qsets_score_less_than_20",
+                            },
                             {
-                                "if": {
-                                    "filter_query": f"{{qset_grade}} = '{grade}'",
-                                    "column_id": f"qset_grade",
-                                },
-                                "backgroundColor": grade_color_coding[grade],
-                            }
-                            for grade in grade_color_coding.keys()
-                        ),
-                    ],
-                    css=[
-                        {
-                            "selector": ".dash-spreadsheet tr td",
-                            "rule": "height: 75px;",
-                        },  # set height of body rows
-                    ],
-                )
-            ],
-        ),
-    ]
-)
+                                "name": "Easy Question Sets",
+                                "id": "qsets_score_more_than_90",
+                            },
+                        ],
+                        style_table={
+                            "overflowX": "auto",
+                            "overflowY": "auto",
+                            "maxWidth": "100%",
+                            "marginTop": "20px",
+                            "marginBottom": "50px",
+                            "maxHeight": "800px",
+                        },
+                        style_data={
+                            "whiteSpace": "nowrap",  # Allow content to wrap
+                            "overflow": "auto",  # Prevent cell expansion
+                            # "textOverflow": "ellipsis",  # Show ellipsis for trimmed content
+                            "minHeight": "100px",  # Limit cell height
+                            "textAlign": "center",
+                            "border": "1px solid black",
+                        },
+                        style_header={
+                            "fontWeight": "bold",
+                            "color": "black",
+                            "border": "1px solid #004494",
+                            "backgroundColor": "#A3C1E0",
+                            "whiteSpace": "normal",
+                            "height": "auto",
+                            "position": "sticky",
+                            "top": "0",
+                            "text-align": "center",
+                        },  # Sticky header
+                        style_cell={
+                            "textAlign": "center",
+                            "minWidth": "100px",
+                            "maxWidth": "150px",  # Fixed max width for cells
+                            "minHeight": "100px",  # Fixed height for cells
+                            "overflow": "auto",  # Scrollbars for overflow
+                            "whiteSpace": "nowrap",  # Allow line wrapping
+                        },
+                        style_data_conditional=[
+                            *(
+                                {
+                                    "if": {
+                                        "filter_query": f"{{operation}} = '{operation}'",
+                                        "column_id": f"operation",
+                                    },
+                                    "backgroundColor": operation_color_coding[
+                                        operation
+                                    ],
+                                }
+                                for operation in operation_color_coding.keys()
+                            ),
+                            *(
+                                {
+                                    "if": {
+                                        "filter_query": f"{{qset_grade}} = '{grade}'",
+                                        "column_id": f"qset_grade",
+                                    },
+                                    "backgroundColor": grade_color_coding[grade],
+                                }
+                                for grade in grade_color_coding.keys()
+                            ),
+                        ],
+                        css=[
+                            {
+                                "selector": ".dash-spreadsheet tr td",
+                                "rule": "height: 75px;",
+                            },  # set height of body rows
+                        ],
+                    )
+                ],
+            ),
+        ]
+    )
+
+
+layout = grade_performance_layout

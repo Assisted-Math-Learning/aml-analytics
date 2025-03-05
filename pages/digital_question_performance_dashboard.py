@@ -17,20 +17,23 @@ dash.register_page(__name__)
 ###################################  Digital Question Performance Dashboard Logic ###################################
 
 
-@callback(
-    Output("dig-qlp-data-table", "data"),
-    Output("dig-qlp-repo-dropdown", "options"),
-    Input("dig-qlp-qset-dropdown", "value"),
-)
-def update_table(selected_qset):
-    # Repository dropdown options
+def get_repo_options():
+    # Get the list of repositories from the database
     repo_options = [
         {"label": repo, "value": repo} for repo in get_repository_names_list()
     ]
+    return repo_options
+
+
+@callback(
+    Output("dig-qlp-data-table", "data"),
+    Input("dig-qlp-qset-dropdown", "value"),
+)
+def update_table(selected_qset):
 
     # Return an empty DataFrame if no question set is selected
     if not selected_qset:
-        return pd.DataFrame([]).to_dict("records"), repo_options
+        return pd.DataFrame([]).to_dict("records")
 
     # SQL query to fetch question level data for the selected question set
     # The query fetches detailed question-level data for a specific question set identified by selected_qset,
@@ -43,7 +46,7 @@ def update_table(selected_qset):
 
     # Return an empty DataFrame if no data is found
     if question_level_data.empty:
-        return pd.DataFrame([]).to_dict("records"), repo_options
+        return pd.DataFrame([]).to_dict("records")
 
     # Sort data by question set ID, learner ID, and question sequence
     question_level_data.sort_values(
@@ -52,9 +55,9 @@ def update_table(selected_qset):
 
     # Calculate time taken by each learner to solve respective questions (in seconds)
     question_level_data["question_time_taken"] = (
-        question_level_data.groupby(["question_set_id", "learner_id", "updated_date"])[
-            "updated_at"
-        ]
+        question_level_data.groupby(
+            ["question_set_id", "learner_id", "updated_date"], observed=True
+        )["updated_at"]
         .diff()
         .dt.total_seconds()
     )
@@ -77,7 +80,8 @@ def update_table(selected_qset):
                 "question_id",
                 "question_uid",
                 "q_seq",
-            ]
+            ],
+            observed=True,
         )
         .agg(
             learners_count=("learner_id", "nunique"),
@@ -103,7 +107,7 @@ def update_table(selected_qset):
     )
 
     # Return the final DataFrame as a dictionary
-    return final_df.to_dict("records"), repo_options
+    return final_df.to_dict("records")
 
 
 @callback(
@@ -120,88 +124,94 @@ def update_qset_options(selected_repo):
 
 ###################################  Digital Question Performance Dashboard Layout ###################################
 
+
 # Define the layout of the Dash app
-layout = html.Div(
-    [
-        html.H1("Question Level Performance Dashboard"),
-        html.Div(
-            [
-                # Dropdown for selecting repository name
-                dcc.Dropdown(
-                    id="dig-qlp-repo-dropdown",
-                    placeholder="Select Repository",
-                    style={"width": "300px", "margin": "10px"},
-                ),
-                # Dropdown for selecting question set ID
-                dcc.Dropdown(
-                    id="dig-qlp-qset-dropdown",
-                    placeholder="Select Question Set ID",
-                    style={"width": "300px", "margin": "10px"},
-                ),
-            ],
-            style={
-                "display": "flex",
-                "justifyContent": "flex-start",  # Center items horizontally
-                "alignItems": "center",  # Align items vertically
-                "flexWrap": "wrap",  # Allow items to wrap to the next line if needed
-                "marginBottom": "10px",
-            },
-        ),
-        # Loading spinner for the data table
-        dcc.Loading(
-            id="dig-qlp-loading-table",
-            type="circle",
-            children=[
-                # Data table to display question level performance data
-                dash_table.DataTable(
-                    id="dig-qlp-data-table",
-                    columns=[
-                        {"name": "Question Set UID", "id": "question_set_uid"},
-                        {"name": "Q-Set Sequence", "id": "qs_seq"},
-                        {"name": "Question UID", "id": "question_uid"},
-                        {"name": "Question Sequence", "id": "q_seq"},
-                        {"name": "Learners Count", "id": "learners_count"},
-                        {"name": "Median Accuracy", "id": "median_accuracy"},
-                        {"name": "Average Accuracy", "id": "average_accuracy"},
-                        {
-                            "name": "Average Time Taken (In Sec)",
-                            "id": "average_time_taken",
+def question_performance_layout():
+    return html.Div(
+        [
+            html.H1("Question Level Performance Dashboard"),
+            html.Div(
+                [
+                    # Dropdown for selecting repository name
+                    dcc.Dropdown(
+                        id="dig-qlp-repo-dropdown",
+                        placeholder="Select Repository",
+                        options=get_repo_options(),
+                        style={"width": "300px", "margin": "10px"},
+                    ),
+                    # Dropdown for selecting question set ID
+                    dcc.Dropdown(
+                        id="dig-qlp-qset-dropdown",
+                        placeholder="Select Question Set ID",
+                        style={"width": "300px", "margin": "10px"},
+                    ),
+                ],
+                style={
+                    "display": "flex",
+                    "justifyContent": "flex-start",  # Center items horizontally
+                    "alignItems": "center",  # Align items vertically
+                    "flexWrap": "wrap",  # Allow items to wrap to the next line if needed
+                    "marginBottom": "10px",
+                },
+            ),
+            # Loading spinner for the data table
+            dcc.Loading(
+                id="dig-qlp-loading-table",
+                type="circle",
+                children=[
+                    # Data table to display question level performance data
+                    dash_table.DataTable(
+                        id="dig-qlp-data-table",
+                        columns=[
+                            {"name": "Question Set UID", "id": "question_set_uid"},
+                            {"name": "Q-Set Sequence", "id": "qs_seq"},
+                            {"name": "Question UID", "id": "question_uid"},
+                            {"name": "Question Sequence", "id": "q_seq"},
+                            {"name": "Learners Count", "id": "learners_count"},
+                            {"name": "Median Accuracy", "id": "median_accuracy"},
+                            {"name": "Average Accuracy", "id": "average_accuracy"},
+                            {
+                                "name": "Average Time Taken (In Sec)",
+                                "id": "average_time_taken",
+                            },
+                        ],
+                        style_table={
+                            "overflow": "auto",
+                            "maxWidth": "100%",
+                            "marginTop": "20px",
+                            "marginBottom": "50px",
+                            "maxHeight": "800px",
                         },
-                    ],
-                    style_table={
-                        "overflow": "auto",
-                        "maxWidth": "100%",
-                        "marginTop": "20px",
-                        "marginBottom": "50px",
-                        "maxHeight": "800px",
-                    },
-                    style_data={
-                        "whiteSpace": "pre-wrap",  # Preserve newlines
-                        "height": "auto",  # Adjust row height
-                        "textAlign": "center",
-                        "border": "1px solid black",
-                    },
-                    style_header={
-                        "fontWeight": "bold",
-                        "color": "black",
-                        "border": "1px solid #004494",
-                        "backgroundColor": "#A3C1E0",
-                        "whiteSpace": "normal",
-                        "height": "auto",
-                        "position": "sticky",
-                        "top": "0",
-                        "text-align": "center",
-                    },  # Sticky header
-                    style_cell={
-                        "textAlign": "center",
-                        "minWidth": "150px",
-                        "maxWidth": "300px",
-                        "overflow": "hidden",
-                        "textOverflow": "ellipsis",
-                    },
-                    data=[],
-                )
-            ],
-        ),
-    ]
-)
+                        style_data={
+                            "whiteSpace": "pre-wrap",  # Preserve newlines
+                            "height": "auto",  # Adjust row height
+                            "textAlign": "center",
+                            "border": "1px solid black",
+                        },
+                        style_header={
+                            "fontWeight": "bold",
+                            "color": "black",
+                            "border": "1px solid #004494",
+                            "backgroundColor": "#A3C1E0",
+                            "whiteSpace": "normal",
+                            "height": "auto",
+                            "position": "sticky",
+                            "top": "0",
+                            "text-align": "center",
+                        },  # Sticky header
+                        style_cell={
+                            "textAlign": "center",
+                            "minWidth": "150px",
+                            "maxWidth": "300px",
+                            "overflow": "hidden",
+                            "textOverflow": "ellipsis",
+                        },
+                        data=[],
+                    )
+                ],
+            ),
+        ]
+    )
+
+
+layout = question_performance_layout
