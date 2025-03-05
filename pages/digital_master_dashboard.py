@@ -1,13 +1,12 @@
 import dash
 from db_utils import (
-    ALL_LEARNERS_KEY,
-    ALL_LOGGED_IN_USERS_KEY,
     get_all_learners_data_df,
-    get_data,
+    get_logged_in_users_data_df,
+    get_all_learners_df,
     get_grades_list,
     get_min_max_timestamp,
     get_qset_types_list,
-    get_question_sequence_data,
+    get_question_sequence_data_df,
     get_schools_list,
     get_tenants_list,
     last_synced_time,
@@ -18,6 +17,7 @@ import pytz
 import re
 from dash import Dash, Input, Output, State, callback, dash_table, dcc, html, no_update
 from datetime import datetime, timedelta
+
 
 # Register the page
 # app = Dash(__name__)
@@ -44,7 +44,7 @@ def check_column_format(input_column):
 def generate_week_ranges(from_date, to_date):
     # Set the min and max dates
     min_date = from_date
-    max_date = to_date
+    max_date = to_date if to_date else datetime.today().date()
 
     # Adjust min_date to the start of the week (Monday)
     start_date = min_date - timedelta(days=min_date.weekday())
@@ -89,16 +89,16 @@ operations_priority = {
 def apply_diff_or_copy(group):
     if group["time_diff_clipped"].sum() > 2700:
         # Apply diff only if sum of 'time_diff_clipped' > threshold
-        group["time_diff_clipped"] = group["time_diff_clipped"].diff(1).abs()
+        group.loc[:, "time_diff_clipped"] = group["time_diff_clipped"].diff(1).abs()
     else:
         # If sum is <= threshold, keep 'time_diff_clipped' values
-        group["time_diff_clipped"] = group["time_diff_clipped"]
+        group.loc[:, "time_diff_clipped"] = group["time_diff_clipped"]
     return group
 
 
 def get_all_learners_options(school: str = ""):
     """Fetch all unique learner IDs from the database."""
-    learners_df = get_data(ALL_LEARNERS_KEY)
+    learners_df = get_all_learners_df()
 
     # Add school filter if provided
     if school == "No School":
@@ -133,12 +133,20 @@ def update_learners_options(selected_school: str):
 # Learners data is basically the data of all learners attempts of all their question-sets and their questions
 
 
-print("I am here")
-
-
 # Create Grade Jump Data
-def get_grade_jump_data(grade_jump_data):
-    # grade_jump_data = all_learners_data.copy()
+def get_grade_jump_data():
+    grade_jump_data = get_all_learners_data_df()[
+        [
+            "learner_id",
+            "tenant_name",
+            "school",
+            "grade",
+            "operation",
+            "qset_grade",
+            "updated_at",
+            "purpose",
+        ]
+    ]
 
     # Filtering the data as per the purpose column
     grade_jump_data = grade_jump_data[grade_jump_data["purpose"] != "Main Diagnostic"]
@@ -158,7 +166,8 @@ def get_grade_jump_data(grade_jump_data):
                     "operation",
                     "qset_grade",
                     "date",
-                ]
+                ],
+                observed=True,
             )
             .agg(min_time=("updated_at", "min"), max_time=("updated_at", "max"))
             .reset_index()
@@ -179,9 +188,9 @@ def get_grade_jump_data(grade_jump_data):
         )
 
         # Apply the diff function to each group of 'learner_id' and 'date'
-        grade_jump_data = grade_jump_data.groupby(["learner_id", "date"]).apply(
-            apply_diff_or_copy
-        )
+        grade_jump_data = grade_jump_data.groupby(
+            ["learner_id", "date"], observed=True
+        ).apply(apply_diff_or_copy)
         grade_jump_data.reset_index(drop=True, inplace=True)
         grade_jump_data["time_diff_clipped"] = grade_jump_data[
             "time_diff_clipped"
@@ -202,8 +211,17 @@ def get_grade_jump_data(grade_jump_data):
 
 
 # Create Operator Jump Data
-def get_operator_jump_data(operator_jump_data):
-    # operator_jump_data = all_learners_data.copy()
+def get_operator_jump_data():
+    operator_jump_data = get_all_learners_data_df()[
+        [
+            "learner_id",
+            "tenant_name",
+            "school",
+            "grade",
+            "operation",
+            "updated_at",
+        ]
+    ]
 
     if not operator_jump_data.empty:
         operator_jump_data.loc[:, "date"] = operator_jump_data["updated_at"].dt.date
@@ -211,7 +229,8 @@ def get_operator_jump_data(operator_jump_data):
         # Aggregating data
         operator_jump_data = (
             operator_jump_data.groupby(
-                ["learner_id", "tenant_name", "school", "grade", "operation", "date"]
+                ["learner_id", "tenant_name", "school", "grade", "operation", "date"],
+                observed=True,
             )
             .agg(min_time=("updated_at", "min"), max_time=("updated_at", "max"))
             .reset_index()
@@ -231,9 +250,9 @@ def get_operator_jump_data(operator_jump_data):
         )
 
         # Apply the diff function to each group of 'learner_id' and 'date'
-        operator_jump_data = operator_jump_data.groupby(["learner_id", "date"]).apply(
-            apply_diff_or_copy
-        )
+        operator_jump_data = operator_jump_data.groupby(
+            ["learner_id", "date"], observed=True
+        ).apply(apply_diff_or_copy)
         operator_jump_data.reset_index(drop=True, inplace=True)
         operator_jump_data["time_diff_clipped"] = operator_jump_data[
             "time_diff_clipped"
@@ -264,18 +283,9 @@ def get_operator_jump_data(operator_jump_data):
 # - All the learners who have attempted/solved even a single question on digital app are overall unique learners
 # - There are sub-divisions of unique learners based on operation - 'Addition', 'Subtraction', 'Multiplication', 'Division'
 # - These subdivisions tell that how many unique learners have attempted questions of these operations till now
-def get_overall_unique_learners(
-    uni_learners_df,
-    from_date: str,
-    to_date: str,
-    school: str,
-    grade: str,
-    operation: str,
-    tenant: str,
-):
+def get_overall_unique_learners(uni_learners_df, from_date: str, to_date: str):
     # Create a copy of the all_learners_data DataFrame
     # uni_learners_df = all_learners_data.copy()
-    print("Shape of unique_learners: ", uni_learners_df.shape)
 
     # Filter the DataFrame based on the provided date range if both from_date and to_date are provided
     if from_date and to_date:
@@ -284,22 +294,6 @@ def get_overall_unique_learners(
             & (uni_learners_df["updated_at"].dt.date <= to_date)
         ]
 
-    # Apply school filter if 'school' is provided
-    if school:
-        uni_learners_df = uni_learners_df[uni_learners_df["school"] == school]
-
-    # Apply grade filter if 'grade' is provided
-    if grade:
-        uni_learners_df = uni_learners_df[uni_learners_df["grade"] == grade]
-
-    # Apply operation filter if 'operation' is provided
-    if operation:
-        uni_learners_df = uni_learners_df[uni_learners_df["operation"] == operation]
-
-    # Apply tenant filter if 'tenant' is provided
-    if tenant:
-        uni_learners_df = uni_learners_df[uni_learners_df["tenant_name"] == tenant]
-
     # Count distinct learners
     overall_count = uni_learners_df["learner_id"].nunique()
     # Create a DataFrame to hold the overall count
@@ -307,7 +301,7 @@ def get_overall_unique_learners(
 
     # Group the DataFrame by 'operation' and count unique learners for each operation
     op_wise_uni_learners_df = (
-        uni_learners_df.groupby(["operation"])["learner_id"]
+        uni_learners_df.groupby(["operation"], observed=True)["learner_id"]
         .nunique()
         .reset_index(name="overall_count")
     )
@@ -332,64 +326,73 @@ def get_overall_unique_learners(
 
 # The definition of unique learners is same as above. The difference is that here the data will be generated for per week.
 # The Number of learners solved/attempted even a single question in that week.
-def get_unique_learners(
-    all_learners_data, from_date, to_date, school, grade, operation, tenant
-):
-    # Fetch overall unique learners count
-    overall_unique_learners = get_overall_unique_learners(
-        all_learners_data, from_date, to_date, school, grade, operation, tenant
-    )
+def get_unique_learners(from_date, to_date, school, grade, operation, tenant):
+    unique_learners_data = get_all_learners_data_df()[
+        ["updated_at", "school", "grade", "operation", "tenant_name", "learner_id"]
+    ]
 
-    # Create a copy of all learners data
-    weekly_unique_learners = all_learners_data.copy()
-
-    # Filter learners records after from_date
-    if from_date:
-        weekly_unique_learners = weekly_unique_learners[
-            weekly_unique_learners["updated_at"].dt.date >= from_date
-        ]
-
-    # Filter learners records till to_date
-    if to_date:
-        weekly_unique_learners = weekly_unique_learners[
-            weekly_unique_learners["updated_at"].dt.date <= to_date
-        ]
+    # Identify learners who were active before the start date
+    previous_learners_list = unique_learners_data[
+        unique_learners_data["updated_at"].dt.date < from_date
+    ]["learner_id"].unique()
 
     # Filter learners of selected school
     if school:
-        weekly_unique_learners = weekly_unique_learners[
-            weekly_unique_learners["school"] == school
+        unique_learners_data = unique_learners_data[
+            unique_learners_data["school"] == school
         ]
 
     # Filter learners of selected grade
     if grade:
-        weekly_unique_learners = weekly_unique_learners[
-            weekly_unique_learners["grade"] == grade
+        unique_learners_data = unique_learners_data[
+            unique_learners_data["grade"] == grade
         ]
     # Filter learners who have performed selected operation
     if operation:
-        weekly_unique_learners = weekly_unique_learners[
-            weekly_unique_learners["operation"] == operation
+        unique_learners_data = unique_learners_data[
+            unique_learners_data["operation"] == operation
         ]
     # Filter learners of selected tenant
     if tenant:
-        weekly_unique_learners = weekly_unique_learners[
-            weekly_unique_learners["tenant_name"] == tenant
+        unique_learners_data = unique_learners_data[
+            unique_learners_data["tenant_name"] == tenant
         ]
 
-    if not weekly_unique_learners.empty:
+    # Fetch overall unique learners count
+    overall_unique_learners = get_overall_unique_learners(
+        unique_learners_data.copy(), from_date, to_date
+    )
+
+    # Filter learners records after from_date
+    if from_date:
+        unique_learners_data = unique_learners_data[
+            unique_learners_data["updated_at"].dt.date >= from_date
+        ]
+
+    # Filter learners records till to_date
+    if to_date:
+        unique_learners_data = unique_learners_data[
+            unique_learners_data["updated_at"].dt.date <= to_date
+        ]
+
+    if not unique_learners_data.empty:
+        # Extract date as 'updated_date' from 'updated_at' column
+        unique_learners_data["updated_date"] = unique_learners_data[
+            "updated_at"
+        ].dt.date
+
         # Get unique learners active on every date
-        weekly_unique_learners = weekly_unique_learners.drop_duplicates(
+        unique_learners_data = unique_learners_data.drop_duplicates(
             subset=["learner_id", "operation", "updated_date"]
         )
 
         # Map week range to every entry based on date
-        weekly_unique_learners.loc[:, "week_range"] = weekly_unique_learners[
+        unique_learners_data.loc[:, "week_range"] = unique_learners_data[
             "updated_date"
         ].apply(lambda x: calculate_range(x))
 
         # Get unique learners active within a week
-        final_unique_learners_df = weekly_unique_learners.drop_duplicates(
+        final_unique_learners_df = unique_learners_data.drop_duplicates(
             subset=["learner_id", "operation", "week_range"]
         ).copy()
 
@@ -404,6 +407,7 @@ def get_unique_learners(
             columns="week_range",  # columns
             values="active_learners",  # Values to aggregate
             aggfunc="nunique",  # Aggregation function
+            observed=True,
         ).reset_index(names=["metrics"])
 
         weekly_uni_lrs_cnt_table.loc[0, "metrics"] = "active learners"
@@ -422,6 +426,7 @@ def get_unique_learners(
             columns="week_range",  # columns
             values="active_learners",  # Values to aggregate
             aggfunc="nunique",  # Aggregation function
+            observed=True,
         )
 
         op_wise_weekly_uni_lrs_cnt_table = op_wise_weekly_uni_lrs_cnt_table.reindex(
@@ -441,7 +446,12 @@ def get_unique_learners(
         [weekly_uni_lrs_cnt_table, op_wise_weekly_uni_lrs_cnt_table]
     )
 
-    return overall_unique_learners, weekly_uni_lrs_cnt_table, final_unique_learners_df
+    # Calculate new learners added
+    weekly_new_learners_added = get_new_learners_added(
+        final_unique_learners_df, previous_learners_list
+    )
+
+    return overall_unique_learners, weekly_uni_lrs_cnt_table, weekly_new_learners_added
 
 
 """ NEW LEARNERS ADDED """
@@ -453,10 +463,7 @@ def get_unique_learners(
 # - That's why this data is based on weeks. It simply calculates the learners record found till that week.
 # - It signifies learners who were already enrolled.
 # - And, Subtract those learners from learners having records in that week. This will provide the new learners if added that week.
-def get_new_learners_added(final_unique_learners_df, previous_learners_list):
-    # Create a copy of the filtered unique learners data to avoid modifying the original DataFrame
-    learners_added_df = final_unique_learners_df.copy()
-
+def get_new_learners_added(learners_added_df, previous_learners_list):
     # Sort the data based on the 'updated_date' column to ensure chronological order
     learners_added_df = learners_added_df.sort_values("updated_date")
 
@@ -480,7 +487,7 @@ def get_new_learners_added(final_unique_learners_df, previous_learners_list):
 
     # Use a pivot table to reshape the data and get the count of new learners added per week
     weekly_new_learners_added = learners_added_df.pivot_table(
-        values="new learners added", columns="week_range"
+        values="new learners added", columns="week_range", observed=True
     ).reset_index(names=["metrics"])
 
     return weekly_new_learners_added
@@ -493,36 +500,13 @@ def get_new_learners_added(final_unique_learners_df, previous_learners_list):
 # Q: What are the logged in users?
 # - The number of logged in users is defined as the total number of users who have logged in during the given period.
 # - It is calculated by counting the number of unique learners who have logged in during the given period.
-def get_overall_logged_in_users(
-    logged_in_users_df,
-    from_date: str,
-    to_date: str,
-    school: str,
-    grade: str,
-    tenant: str,
-):
+def get_overall_logged_in_users(logged_in_users_df, from_date: str, to_date: str):
     # Apply date filter if 'from_date' and 'to_date' are provided
     if from_date and to_date:
         # Filter the DataFrame to include only records within the specified date range
         logged_in_users_df = logged_in_users_df[
             (logged_in_users_df["created_on"].dt.date >= from_date)
             & (logged_in_users_df["created_on"].dt.date <= to_date)
-        ]
-
-    # Filter learners of selected school
-    if school:
-        logged_in_users_df = logged_in_users_df[logged_in_users_df["school"] == school]
-
-    # Apply grade filter if 'grade' is provided
-    if grade:
-        # Filter the DataFrame to include only records of the specified grade
-        logged_in_users_df = logged_in_users_df[logged_in_users_df["grade"] == grade]
-
-    # Apply tenant filter if 'tenant' is provided
-    if tenant:
-        # Filter the DataFrame to include only records of the specified tenant
-        logged_in_users_df = logged_in_users_df[
-            logged_in_users_df["tenant_name"] == tenant
         ]
 
     # Count the number of unique logged-in users
@@ -542,85 +526,87 @@ def get_logged_in_users(
     from_date: str, to_date: str, school: str, grade: str, tenant: str
 ):
     # Fetch logged in users data
-    logged_in_users_df = get_data(ALL_LOGGED_IN_USERS_KEY)
+    logged_in_users_data = get_logged_in_users_data_df()[
+        ["created_on", "school", "grade", "tenant_name", "learner_id"]
+    ]
 
     # Convert `created_on` to datetime type
-    logged_in_users_df["created_on"] = pd.to_datetime(logged_in_users_df["created_on"])
+    logged_in_users_data["created_on"] = pd.to_datetime(
+        logged_in_users_data["created_on"]
+    )
 
     # Add `No School` to school column if school is empty
-    logged_in_users_df["school"] = logged_in_users_df["school"].fillna("No School")
+    logged_in_users_data["school"] = logged_in_users_data["school"].cat.add_categories(
+        "No School"
+    )
+    logged_in_users_data["school"] = logged_in_users_data["school"].fillna("No School")
 
     # Extract logged in date from `created_on` column
-    logged_in_users_df["logged_in_date"] = logged_in_users_df["created_on"].dt.date
+    logged_in_users_data["logged_in_date"] = logged_in_users_data["created_on"].dt.date
 
     # Drop duplicates on `learner_id` and `logged_in_date` columns
-    logged_in_users_df.drop_duplicates(
+    logged_in_users_data.drop_duplicates(
         subset=["learner_id", "logged_in_date"], inplace=True
     )
 
-    # Fetch overall unique logged in users count
-    overall_logged_in_users = get_overall_logged_in_users(
-        logged_in_users_df, from_date, to_date, school, grade, tenant
-    )
-
-    # Create a copy of the logged in users data
-    weekly_logged_in_users = logged_in_users_df.copy()
-
-    # Filter records after from_date
-    if from_date:
-        weekly_logged_in_users = weekly_logged_in_users[
-            weekly_logged_in_users["created_on"].dt.date >= from_date
-        ]
-
-    # Filter records before to_date
-    if to_date:
-        weekly_logged_in_users = weekly_logged_in_users[
-            weekly_logged_in_users["created_on"].dt.date <= to_date
-        ]
-
     # Filter records of a particular school
     if school:
-        weekly_logged_in_users = weekly_logged_in_users[
-            weekly_logged_in_users["school"] == school
+        logged_in_users_data = logged_in_users_data[
+            logged_in_users_data["school"] == school
         ]
 
     # Filter records of a particular grade
     if grade:
-        weekly_logged_in_users = weekly_logged_in_users[
-            weekly_logged_in_users["grade"] == grade
+        logged_in_users_data = logged_in_users_data[
+            logged_in_users_data["grade"] == grade
         ]
 
     # Filter records of a particular tenant
     if tenant:
-        weekly_logged_in_users = weekly_logged_in_users[
-            weekly_logged_in_users["tenant_name"] == tenant
+        logged_in_users_data = logged_in_users_data[
+            logged_in_users_data["tenant_name"] == tenant
         ]
 
-    if not weekly_logged_in_users.empty:
+    # Fetch overall unique logged in users count
+    overall_logged_in_users = get_overall_logged_in_users(
+        logged_in_users_data.copy(), from_date, to_date
+    )
+
+    # Filter records after from_date
+    if from_date:
+        logged_in_users_data = logged_in_users_data[
+            logged_in_users_data["created_on"].dt.date >= from_date
+        ]
+
+    # Filter records before to_date
+    if to_date:
+        logged_in_users_data = logged_in_users_data[
+            logged_in_users_data["created_on"].dt.date <= to_date
+        ]
+
+    if not logged_in_users_data.empty:
         # Map week range to every entry based on date
-        weekly_logged_in_users.loc[:, "week_range"] = weekly_logged_in_users[
+        logged_in_users_data.loc[:, "week_range"] = logged_in_users_data[
             "logged_in_date"
         ].apply(lambda x: calculate_range(x))
 
         # Rename 'learner_id' to 'logged_in_learners'
-        weekly_logged_in_users.rename(
+        logged_in_users_data.rename(
             columns={"learner_id": "logged_in_learners"}, inplace=True
         )
 
         # Create pivot table for weekly representation of logged in users count
         weekly_logged_in_users_cnt_table = pd.pivot_table(
-            weekly_logged_in_users,
+            logged_in_users_data,
             columns="week_range",  # columns
             values="logged_in_learners",  # Values to aggregate
             aggfunc="count",  # Aggregation function
+            observed=True,
         ).reset_index(names=["metrics"])
         weekly_logged_in_users_cnt_table.loc[0, "metrics"] = "logged in learners"
     else:
         weekly_logged_in_users_cnt_table = pd.DataFrame(
             {"metrics": ["logged in learners"]}
-        )
-        weekly_logged_in_users = pd.DataFrame(
-            columns=["logged_in_learners", "logged_in_date", "week_range"]
         )
 
     # Return the logged in users count, weekly logged in users count, and the logged in users DataFrame
@@ -633,9 +619,7 @@ def get_logged_in_users(
 
 # Q: What is the definition of session?
 # - If we have records of 3 or more learners of a class of a school an a date, then that will be counted as a session.
-def get_overall_sessions(
-    uni_sessions_df, from_date: str, to_date: str, school: str, grade: str, tenant: str
-):
+def get_overall_sessions(uni_sessions_df, from_date: str, to_date: str):
     # Create a copy of the all_learners_data DataFrame to work with
     # uni_sessions_df = all_learners_data.copy()
 
@@ -647,20 +631,6 @@ def get_overall_sessions(
             & (uni_sessions_df["updated_at"].dt.date <= to_date)
         ]
 
-    # Filter learners of selected school
-    if school:
-        uni_sessions_df = uni_sessions_df[uni_sessions_df["school"] == school]
-
-    # Apply grade filter if 'grade' is provided
-    if grade:
-        # Filter the DataFrame to include only records of the specified grade
-        uni_sessions_df = uni_sessions_df[uni_sessions_df["grade"] == grade]
-
-    # Apply tenant filter if 'tenant' is provided
-    if tenant:
-        # Filter the DataFrame to include only records of the specified tenant
-        uni_sessions_df = uni_sessions_df[uni_sessions_df["tenant_name"] == tenant]
-
     # Check if the DataFrame is empty after applying filters
     if uni_sessions_df.empty:
         # If the DataFrame is empty, return a DataFrame with an overall count of 0
@@ -669,7 +639,8 @@ def get_overall_sessions(
         # Group the DataFrame by date and grade, and count the number of distinct learners (learner_id)
         session_groups = (
             uni_sessions_df.groupby(
-                [uni_sessions_df["updated_at"].dt.date, "school", "grade"]
+                [uni_sessions_df["updated_at"].dt.date, "school", "grade"],
+                observed=True,
             )
             .agg(total_learners=("learner_id", "nunique"))
             .reset_index()
@@ -697,61 +668,53 @@ def get_overall_sessions(
 
 
 # - This will provide the number of sessions conducted in that week.
-def get_sessions(all_learners_data, from_date, to_date, school, grade, tenant):
-    # Fetch the overall sessions count
-    overall_sessions = get_overall_sessions(
-        all_learners_data, from_date, to_date, school, grade, tenant
-    )
-
-    # Create a copy of the all learners data DataFrame
-    weekly_sessions_data = all_learners_data.copy()
-
-    # Filter learners records to include only those after the specified from_date
-    if from_date:
-        weekly_sessions_data = weekly_sessions_data[
-            weekly_sessions_data["updated_at"].dt.date >= from_date
-        ]
-
-    # Filter learners records to include only those up to the specified to_date
-    if to_date:
-        weekly_sessions_data = weekly_sessions_data[
-            weekly_sessions_data["updated_at"].dt.date <= to_date
-        ]
+def get_sessions(from_date, to_date, school, grade, tenant):
+    sessions_data = get_all_learners_data_df()[
+        ["updated_at", "school", "grade", "tenant_name", "learner_id"]
+    ]
 
     # Filter learners of selected school
     if school:
-        weekly_sessions_data = weekly_sessions_data[
-            weekly_sessions_data["school"] == school
-        ]
+        sessions_data = sessions_data[sessions_data["school"] == school]
 
     # Filters learners of the selected grade
     if grade:
-        weekly_sessions_data = weekly_sessions_data[
-            weekly_sessions_data["grade"] == grade
-        ]
+        sessions_data = sessions_data[sessions_data["grade"] == grade]
 
     # Filters learners of the selected tenant
     if tenant:
-        weekly_sessions_data = weekly_sessions_data[
-            weekly_sessions_data["tenant_name"] == tenant
-        ]
+        sessions_data = sessions_data[sessions_data["tenant_name"] == tenant]
+
+    # Fetch the overall sessions count
+    overall_sessions = get_overall_sessions(sessions_data.copy(), from_date, to_date)
+
+    # Filter learners records to include only those after the specified from_date
+    if from_date:
+        sessions_data = sessions_data[sessions_data["updated_at"].dt.date >= from_date]
+
+    # Filter learners records to include only those up to the specified to_date
+    if to_date:
+        sessions_data = sessions_data[sessions_data["updated_at"].dt.date <= to_date]
 
     # Check if the DataFrame is not empty after applying filters
-    if not weekly_sessions_data.empty:
+    if not sessions_data.empty:
+        # Extract date from updated_at column
+        sessions_data["updated_date"] = sessions_data["updated_at"].dt.date
+
         # Get unique learners of respective grades on every date
-        weekly_sessions_data = weekly_sessions_data.drop_duplicates(
+        sessions_data = sessions_data.drop_duplicates(
             subset=["school", "grade", "updated_date", "learner_id"]
         )
 
         # Map week range to every entry based on date
-        weekly_sessions_data.loc[:, "week_range"] = weekly_sessions_data[
-            "updated_date"
-        ].apply(lambda x: calculate_range(x))
+        sessions_data.loc[:, "week_range"] = sessions_data["updated_date"].apply(
+            lambda x: calculate_range(x)
+        )
 
         # Count the number of unique learners of respective grades on every date
         grouped_session_data = (
-            weekly_sessions_data.groupby(
-                ["school", "grade", "week_range", "updated_date"]
+            sessions_data.groupby(
+                ["school", "grade", "week_range", "updated_date"], observed=True
             )["learner_id"]
             .count()
             .reset_index()
@@ -765,7 +728,11 @@ def get_sessions(all_learners_data, from_date, to_date, school, grade, tenant):
 
         # Create a pivot table for weekly representation of sessions count
         weekly_sessions_cnt_table = pd.pivot_table(
-            grouped_session_data, values="sessions", columns="week_range", aggfunc="sum"
+            grouped_session_data,
+            values="sessions",
+            columns="week_range",
+            aggfunc="sum",
+            observed=True,
         ).reset_index(names=["metrics"])
     else:
         # If the DataFrame is empty after filtering, return a DataFrame with a single column 'metrics'
@@ -781,15 +748,7 @@ def get_sessions(all_learners_data, from_date, to_date, school, grade, tenant):
 # Q: What is the definition of work done?
 # - The number of questions is simply called as work done.
 # - overall work done is total number of questions solved by all learners on the digital app till now.
-def get_overall_work_done(
-    work_done_df,
-    from_date: str,
-    to_date: str,
-    school: str,
-    grade: str,
-    operation: str,
-    tenant: str,
-):
+def get_overall_work_done(work_done_df, from_date: str, to_date: str):
     # Create a copy of the all_learners_data DataFrame to work with
     # work_done_df = all_learners_data.copy()
 
@@ -800,25 +759,6 @@ def get_overall_work_done(
             (work_done_df["updated_at"].dt.date >= from_date)
             & (work_done_df["updated_at"].dt.date <= to_date)
         ]
-
-    # Filter learners of selected school
-    if school:
-        work_done_df = work_done_df[work_done_df["school"] == school]
-
-    # Apply grade filter if 'grade' is provided
-    if grade:
-        # Filter the DataFrame to include only records of the specified grade
-        work_done_df = work_done_df[work_done_df["grade"] == grade]
-
-    # Apply operation filter if 'operation' is provided
-    if operation:
-        # Filter the DataFrame to include only records of the specified operation
-        work_done_df = work_done_df[work_done_df["operation"] == operation]
-
-    # Apply tenant filter if 'tenant' is provided
-    if tenant:
-        # Filter the DataFrame to include only records of the specified tenant
-        work_done_df = work_done_df[work_done_df["tenant_name"] == tenant]
 
     # Check if the DataFrame is empty after applying all filters
     if work_done_df.empty:
@@ -840,70 +780,86 @@ def get_overall_work_done(
 
 # This will provide the number of questions solved by learners in respective weeks.
 def get_work_done(
-    all_learners_data,
     from_date: str,
     to_date: str,
     school: str,
     grade: str,
     operation: str,
     tenant: str,
+    overall_unique_learners: pd.DataFrame,
 ):
-    # Fetch the overall work done based on the provided filters
-    overall_work_done = get_overall_work_done(
-        all_learners_data, from_date, to_date, school, grade, operation, tenant
-    )
-
-    # Create a copy of the all_learners_data DataFrame to work with
-    work_done_df = all_learners_data.copy()
-
-    # Apply date filter if 'from_date' is provided
-    if from_date:
-        # Filter the DataFrame to include only records with dates on or after 'from_date'
-        work_done_df = work_done_df[work_done_df["updated_at"].dt.date >= from_date]
-
-    # Apply date filter if 'to_date' is provided
-    if to_date:
-        # Filter the DataFrame to include only records with dates on or before 'to_date'
-        work_done_df = work_done_df[work_done_df["updated_at"].dt.date <= to_date]
+    work_done_data = get_all_learners_data_df()[
+        [
+            "updated_at",
+            "school",
+            "operation",
+            "grade",
+            "tenant_name",
+            "learner_id",
+            "attempts_count",
+        ]
+    ]
 
     # Filter learners of selected school
     if school:
-        work_done_df = work_done_df[work_done_df["school"] == school]
+        work_done_data = work_done_data[work_done_data["school"] == school]
 
     # Apply grade filter if 'grade' is provided
     if grade:
         # Filter the DataFrame to include only records of the specified 'grade'
-        work_done_df = work_done_df[work_done_df["grade"] == grade]
+        work_done_data = work_done_data[work_done_data["grade"] == grade]
 
     # Apply operation filter if 'operation' is provided
     if operation:
         # Filter the DataFrame to include only records of the specified 'operation'
-        work_done_df = work_done_df[work_done_df["operation"] == operation]
+        work_done_data = work_done_data[work_done_data["operation"] == operation]
 
     # Apply tenant filter if 'tenant' is provided
     if tenant:
         # Filter the DataFrame to include only records of the specified 'tenant'
-        work_done_df = work_done_df[work_done_df["tenant_name"] == tenant]
+        work_done_data = work_done_data[work_done_data["tenant_name"] == tenant]
+
+    # Fetch the overall work done based on the provided filters
+    overall_work_done = get_overall_work_done(work_done_data.copy(), from_date, to_date)
+
+    # Apply date filter if 'from_date' is provided
+    if from_date:
+        # Filter the DataFrame to include only records with dates on or after 'from_date'
+        work_done_data = work_done_data[
+            work_done_data["updated_at"].dt.date >= from_date
+        ]
+
+    # Apply date filter if 'to_date' is provided
+    if to_date:
+        # Filter the DataFrame to include only records with dates on or before 'to_date'
+        work_done_data = work_done_data[work_done_data["updated_at"].dt.date <= to_date]
 
     # Check if the DataFrame is empty after applying all filters
-    if not work_done_df.empty:
+    if not work_done_data.empty:
+        # Extract date from updated_at column
+        work_done_data["updated_date"] = work_done_data["updated_at"].dt.date
+
         # Map the week range to every entry based on the date
-        work_done_df.loc[:, "week_range"] = work_done_df["updated_date"].apply(
+        work_done_data.loc[:, "week_range"] = work_done_data["updated_date"].apply(
             lambda x: calculate_range(x)
         )
 
         # Rename the 'attempts_count' column to 'work done'
-        work_done_df.rename(columns={"attempts_count": "work done"}, inplace=True)
+        work_done_data.rename(columns={"attempts_count": "work done"}, inplace=True)
 
         # Create a pivot table for the weekly representation of work done
         weekly_work_done = pd.pivot_table(
-            work_done_df, values="work done", columns="week_range", aggfunc="count"
+            work_done_data,
+            values="work done",
+            columns="week_range",
+            aggfunc="count",
+            observed=True,
         ).reset_index(names=["metrics"])
     else:
         # If the DataFrame is empty, create a DataFrame with a single column 'metrics' containing 'work done'
         weekly_work_done = pd.DataFrame({"metrics": ["work done"]})
         # Create an empty DataFrame with the required columns
-        work_done_df = pd.DataFrame(
+        work_done_data = pd.DataFrame(
             columns=[
                 "work done",
                 "learner_id",
@@ -911,8 +867,25 @@ def get_work_done(
             ]
         )
 
+    # Calculate average work done per learner and weekly work done per learner
+    overall_work_done_avg, weekly_work_done_per_lr = get_avg_work_done_per_learner(
+        work_done_data.copy(), overall_work_done, overall_unique_learners
+    )
+
+    # Calculate median work done per learner
+    overall_median_work_done, weekly_median_work_done = (
+        get_median_work_done_per_learner(work_done_data.copy())
+    )
+
     # Return the overall work done, weekly work done, and the filtered DataFrame
-    return overall_work_done, weekly_work_done, work_done_df
+    return (
+        overall_work_done,
+        weekly_work_done,
+        overall_work_done_avg,
+        weekly_work_done_per_lr,
+        overall_median_work_done,
+        weekly_median_work_done,
+    )
 
 
 """ AVERAGE WORK DONE PER LEARNER """
@@ -925,7 +898,7 @@ def get_work_done(
 # - At overall level, It represents the total average number of questions solved by each learner.
 # - At week wise level, It represents the average number of questions solved by learners in that week.
 def get_avg_work_done_per_learner(
-    work_done_df, overall_work_done, overall_unique_learners
+    work_done_per_learner_df, overall_work_done, overall_unique_learners
 ):
     # Calculate the average work done per learner at the overall level
     # This is done by dividing the total work done by the number of unique learners
@@ -940,9 +913,6 @@ def get_avg_work_done_per_learner(
 
     # Create a DataFrame to hold the overall average work done per learner
     overall_work_done_avg = pd.DataFrame([{"overall_count": overall_work_done_per_lr}])
-
-    # Create a copy of the filtered work done DataFrame to work with
-    work_done_per_learner_df = work_done_df.copy()
 
     # Count the number of unique learners who worked in each week range
     # This is done by mapping the 'week_range' to the count of unique learners for each week range
@@ -959,6 +929,7 @@ def get_avg_work_done_per_learner(
             values=["work done", "unique_learners"],
             index="week_range",  # Use 'week_range' as index if it makes sense for your use case
             aggfunc={"work done": "count", "unique_learners": "first"},
+            observed=True,
         )
         # Calculate the average work done per learner for each week range
         weekly_work_done_per_lr["work done per learner"] = (
@@ -974,6 +945,7 @@ def get_avg_work_done_per_learner(
     else:
         # If the DataFrame is empty, create a DataFrame with a single column 'metrics' containing 'work done per learner'
         weekly_work_done_per_lr = pd.DataFrame({"metrics": ["work done per learner"]})
+
     # Return the overall average work done per learner and the weekly average work done per learner
     return overall_work_done_avg, weekly_work_done_per_lr
 
@@ -988,13 +960,10 @@ def get_avg_work_done_per_learner(
 # - It will signify the minimum/maximum number of questions getting attempted by half of the learners.
 # - At overall level, It represents the median of number of questions attempted by each learner till now.
 # - At week wise level, It represents the median of number of questions attempted by learners in that week.
-def get_median_work_done_per_learner(work_done_df):
-    # Create a copy of the filtered work done data to work with
-    work_done_per_learner_df = work_done_df.copy()
-
+def get_median_work_done_per_learner(work_done_per_learner_df):
     # Calculate the overall median work done per learner by counting the 'work done' for each learner
     overall_median_work_done_per_lr = (
-        work_done_per_learner_df.groupby("learner_id")
+        work_done_per_learner_df.groupby("learner_id", observed=True)
         .agg(
             work_done=("work done", "count")
         )  # Aggregate 'work done' by counting for each learner
@@ -1009,8 +978,8 @@ def get_median_work_done_per_learner(work_done_df):
     if not work_done_per_learner_df.empty:
         # Create a DataFrame to hold the work done data for every learner in their respective week ranges
         weekly_work_done_by_learners = (
-            work_done_df.groupby(
-                ["learner_id", "week_range"]
+            work_done_per_learner_df.groupby(
+                ["learner_id", "week_range"], observed=True
             )  # Group by 'learner_id' and 'week_range'
             .agg(
                 work_done=("work done", "count")
@@ -1024,6 +993,7 @@ def get_median_work_done_per_learner(work_done_df):
             values="work_done",  # Use 'work_done' as the value to pivot
             index="week_range",  # Use 'week_range' as the index if it makes sense for your use case
             aggfunc="median",  # Aggregate 'work_done' by taking the median for each week range
+            observed=True,
         )
         # Transpose the DataFrame to have 'week_range' as columns and 'metrics' as the index
         weekly_median_work_done = weekly_median_work_done.transpose().reset_index(
@@ -1036,6 +1006,7 @@ def get_median_work_done_per_learner(work_done_df):
         weekly_median_work_done = pd.DataFrame(
             {"metrics": ["Median Work Done Per Learner"]}
         )
+
     # Return the overall median work done per learner and the weekly median work done per learner
     return overall_median_work_done, weekly_median_work_done
 
@@ -1048,15 +1019,7 @@ def get_median_work_done_per_learner(work_done_df):
 # - Time taken is defined as the difference of time of first attempted and last attempted question of the learner on that date.
 # - But, Aggregating the time taken/spent by all learners on the digital app till date is represented as overall time taken
 # NOTE: Maximum limit of time spent for a learner on a date is 45 minutes/ 2700 seconds.
-def get_overall_time_taken(
-    time_taken_df,
-    from_date: str,
-    to_date: str,
-    school: str,
-    grade: str,
-    operation: str,
-    tenant: str,
-):
+def get_overall_time_taken(time_taken_df, from_date: str, to_date: str):
     """
     This function calculates the overall time taken by all learners.
     It applies date, grade, and operation filters if provided.
@@ -1071,22 +1034,6 @@ def get_overall_time_taken(
             & (time_taken_df["updated_at"].dt.date <= to_date)
         ]
 
-    # Filter learners of selected school
-    if school:
-        time_taken_df = time_taken_df[time_taken_df["school"] == school]
-
-    # Apply grade filter if 'grade' is provided
-    if grade:
-        time_taken_df = time_taken_df[time_taken_df["grade"] == grade]
-
-    # Apply operation filter if 'operation' is provided
-    if operation:
-        time_taken_df = time_taken_df[time_taken_df["operation"] == operation]
-
-    # Apply tenant filter if 'tenant' is provided
-    if tenant:
-        time_taken_df = time_taken_df[time_taken_df["tenant_name"] == tenant]
-
     # Check if DataFrame is empty after operation filter
     if time_taken_df.empty:
         total_time_taken = 0
@@ -1094,7 +1041,9 @@ def get_overall_time_taken(
         # Group by learner_id and date, then calculate min and max times
         time_taken_df["updated_at"] = pd.to_datetime(time_taken_df["updated_at"])
         time_taken_df_grouped = (
-            time_taken_df.groupby(["learner_id", time_taken_df["updated_at"].dt.date])
+            time_taken_df.groupby(
+                ["learner_id", time_taken_df["updated_at"].dt.date], observed=True
+            )
             .agg(min_time=("updated_at", "min"), max_time=("updated_at", "max"))
             .reset_index()
         )
@@ -1121,49 +1070,70 @@ def get_overall_time_taken(
 
 # - Time taken/spent by learners on the digital app in that week.
 def get_total_time_taken(
-    all_learners_data, from_date, to_date, school, grade, operation, tenant
+    from_date,
+    to_date,
+    school,
+    grade,
+    operation,
+    tenant,
+    overall_unique_learners: pd.DataFrame,
 ):
     """
     This function calculates the total time taken by learners on the digital app
     within a specified date range, grade, and operation. It also provides a weekly
     breakdown of the total time taken.
     """
-    # Fetch overall time taken
-    overall_time_taken = get_overall_time_taken(
-        all_learners_data, from_date, to_date, school, grade, operation, tenant
-    )
-
-    # Create a copy of all learners data to work with
-    total_time_df = all_learners_data.copy()
-
-    # Apply date filter if 'from_date' is provided
-    if from_date:
-        total_time_df = total_time_df[total_time_df["updated_at"].dt.date >= from_date]
-
-    # Apply date filter if 'to_date' is provided
-    if to_date:
-        total_time_df = total_time_df[total_time_df["updated_at"].dt.date <= to_date]
+    time_taken_data = get_all_learners_data_df()[
+        [
+            "updated_at",
+            "school",
+            "operation",
+            "grade",
+            "tenant_name",
+            "learner_id",
+        ]
+    ]
 
     # Filter learners of selected school
     if school:
-        total_time_df = total_time_df[total_time_df["school"] == school]
+        time_taken_data = time_taken_data[time_taken_data["school"] == school]
 
     # Apply grade filter if 'grade' is provided
     if grade:
-        total_time_df = total_time_df[total_time_df["grade"] == grade]
+        time_taken_data = time_taken_data[time_taken_data["grade"] == grade]
 
     # Apply operation filter if 'operation' is provided
     if operation:
-        total_time_df = total_time_df[total_time_df["operation"] == operation]
+        time_taken_data = time_taken_data[time_taken_data["operation"] == operation]
 
     # Apply tenant filter if 'tenant' is provided
     if tenant:
-        total_time_df = total_time_df[total_time_df["tenant_name"] == tenant]
+        time_taken_data = time_taken_data[time_taken_data["tenant_name"] == tenant]
 
-    if not total_time_df.empty:
+    # Fetch overall time taken
+    overall_time_taken = get_overall_time_taken(
+        time_taken_data.copy(), from_date, to_date
+    )
+
+    # Apply date filter if 'from_date' is provided
+    if from_date:
+        time_taken_data = time_taken_data[
+            time_taken_data["updated_at"].dt.date >= from_date
+        ]
+
+    # Apply date filter if 'to_date' is provided
+    if to_date:
+        time_taken_data = time_taken_data[
+            time_taken_data["updated_at"].dt.date <= to_date
+        ]
+
+    if not time_taken_data.empty:
+        # Extract date from 'updated_at' column
+        time_taken_data["updated_date"] = time_taken_data["updated_at"].dt.date
+
         # Calculate max and min timestamp of learners on every date
-        total_time_df = (
-            total_time_df.groupby(["updated_date", "learner_id"])
+        time_taken_data = (
+            time_taken_data.groupby(["updated_date", "learner_id"], observed=True)
             .agg(
                 min_time=("updated_at", lambda x: x.loc[x.idxmin()]),
                 max_time=("updated_at", lambda x: x.loc[x.idxmax()]),
@@ -1172,31 +1142,43 @@ def get_total_time_taken(
         )
 
         # Calculate total time in seconds by subtracting max and min time
-        total_time_df["time_diff"] = (
-            total_time_df["max_time"] - total_time_df["min_time"]
+        time_taken_data["time_diff"] = (
+            time_taken_data["max_time"] - time_taken_data["min_time"]
         ).dt.total_seconds()
 
         # Set maximum value of 'time_diff' to 45 minutes = 2700 seconds
-        total_time_df["time_diff"] = total_time_df["time_diff"].clip(upper=2700)
+        time_taken_data["time_diff"] = time_taken_data["time_diff"].clip(upper=2700)
 
         # Map week range to every entry based on date
-        total_time_df.loc[:, "week_range"] = total_time_df["updated_date"].apply(
+        time_taken_data.loc[:, "week_range"] = time_taken_data["updated_date"].apply(
             lambda x: calculate_range(x)
         )
 
         # Create pivot table for weekly representation of total time taken
         weekly_total_time = pd.pivot_table(
-            total_time_df,
+            time_taken_data,
             values="time_diff",
             columns="week_range",
             aggfunc=lambda x: round(x.sum() / 60, 2),
+            observed=True,
         ).reset_index(names=["metrics"])
         weekly_total_time.loc[0, "metrics"] = "total time spent (in min)"
     else:
         weekly_total_time = pd.DataFrame({"metrics": ["total time spent (in min)"]})
-        total_time_df = pd.DataFrame(columns=["time_diff", "week_range", "learner_id"])
+        time_taken_data = pd.DataFrame(
+            columns=["time_diff", "week_range", "learner_id"]
+        )
 
-    return overall_time_taken, weekly_total_time, total_time_df
+    # Calculate average time taken per learner and weekly time taken per learner
+    overall_time_taken_avg, weekly_time_taken_per_lr = avg_time_taken_per_learner(
+        time_taken_data, overall_time_taken, overall_unique_learners
+    )
+    return (
+        overall_time_taken,
+        weekly_total_time,
+        overall_time_taken_avg,
+        weekly_time_taken_per_lr,
+    )
 
 
 """ AVERAGE TIME TAKEN PER LEARNER """
@@ -1207,7 +1189,7 @@ def get_total_time_taken(
 # Q: What is the definition of average time taken per learner?
 # - The time spent by each learner on average on digital app to solve questions.
 def avg_time_taken_per_learner(
-    total_time_df, overall_time_taken, overall_unique_learners
+    time_taken_per_learner_df, overall_time_taken, overall_unique_learners
 ):
     # Calculate the average time taken per learner at the overall level
     # This is done by dividing the total time taken by the number of unique learners
@@ -1224,9 +1206,6 @@ def avg_time_taken_per_learner(
     overall_time_taken_avg = pd.DataFrame(
         [{"overall_count": overall_time_taken_per_lr}]
     )
-
-    # Create a copy of the filtered total time taken data to work with
-    time_taken_per_learner_df = total_time_df.copy()
 
     # Count the number of unique learners who worked in each week range
     # This is done by mapping the 'week_range' to the count of unique learners for each week range
@@ -1248,6 +1227,7 @@ def avg_time_taken_per_learner(
                 ),  # Convert seconds to minutes and round to 2 decimal places
                 "unique_learners": "first",  # Take the first value of 'unique_learners' for each week range
             },
+            observed=True,
         )
         # Calculate the average time spent per learner for each week range
         weekly_time_taken_per_lr["average time spent per learner (in min)"] = round(
@@ -1281,18 +1261,7 @@ def avg_time_taken_per_learner(
 # - The central value of accuracy (number of correct questions attempted compared to all the questions attempted) by a learner.
 # - It will signify the minimum/maximum number of correctness performed by half of the learners.
 # - At overall level, It represents the median of accuracies of all learners on the data attempted till now.
-def get_overall_median_accuracy(
-    accuracy_df,
-    from_date: str,
-    to_date: str,
-    school: str,
-    grade: str,
-    operation: str,
-    tenant: str,
-):
-    # Create a copy of the all_learners_data DataFrame to work with
-    # accuracy_df = all_learners_data.copy()
-
+def get_overall_median_accuracy(accuracy_df, from_date: str, to_date: str):
     # Apply date filter if 'from_date' and 'to_date' are provided
     if from_date and to_date:
         # Filter the DataFrame to include only records within the specified date range
@@ -1300,25 +1269,6 @@ def get_overall_median_accuracy(
             (accuracy_df["updated_at"].dt.date >= from_date)
             & (accuracy_df["updated_at"].dt.date <= to_date)
         ]
-
-    # Filter learners of selected school
-    if school:
-        accuracy_df = accuracy_df[accuracy_df["school"] == school]
-
-    # Apply grade filter if 'grade' is provided
-    if grade:
-        # Filter the DataFrame to include only records of the specified grade
-        accuracy_df = accuracy_df[accuracy_df["grade"] == grade]
-
-    # Apply operation filter if 'operation' is provided
-    if operation:
-        # Filter the DataFrame to include only records of the specified operation
-        accuracy_df = accuracy_df[accuracy_df["operation"] == operation]
-
-    # Apply tenant filter if 'tenant' is provided
-    if tenant:
-        # Filter the DataFrame to include only records of the specified 'tenant'
-        accuracy_df = accuracy_df[accuracy_df["tenant_name"] == tenant]
 
     # Check if DataFrame is empty after all filters
     if accuracy_df.empty:
@@ -1329,7 +1279,7 @@ def get_overall_median_accuracy(
         # This is done by grouping the DataFrame by 'learner_id', aggregating 'score' to calculate accuracy,
         # and then resetting the index to include 'learner_id' in the result
         accuracy_df_grouped = (
-            accuracy_df.groupby("learner_id")
+            accuracy_df.groupby("learner_id", observed=True)
             .agg(accuracy=("score", lambda x: round((x.sum() / x.count()) * 100, 2)))
             .reset_index()
         )
@@ -1348,64 +1298,80 @@ def get_overall_median_accuracy(
 
 
 # - At week wise level, It represents the median of accuracies of all learners on the data attempted in that week.
-def get_median_accuracy(
-    all_learners_data, from_date, to_date, school, grade, operation, tenant
-):
-    # Fetch the overall median accuracy of learners
-    overall_median_accuracy = get_overall_median_accuracy(
-        all_learners_data, from_date, to_date, school, grade, operation, tenant
-    )
-
-    # Create a copy of the all learners data DataFrame to work with
-    median_accuracy_df = all_learners_data.copy()
-
-    # Apply date filter if 'from_date' is provided
-    if from_date:
-        # Filter the DataFrame to include only records with dates on or after 'from_date'
-        median_accuracy_df = median_accuracy_df[
-            median_accuracy_df["updated_at"].dt.date >= from_date
+def get_median_accuracy(from_date, to_date, school, grade, operation, tenant):
+    learners_accuracy_data = get_all_learners_data_df()[
+        [
+            "updated_at",
+            "school",
+            "operation",
+            "grade",
+            "tenant_name",
+            "learner_id",
+            "score",
         ]
-
-    # Apply date filter if 'to_date' is provided
-    if to_date:
-        # Filter the DataFrame to include only records with dates on or before 'to_date'
-        median_accuracy_df = median_accuracy_df[
-            median_accuracy_df["updated_at"].dt.date <= to_date
-        ]
+    ]
 
     # Filter learners of selected school
     if school:
-        median_accuracy_df = median_accuracy_df[median_accuracy_df["school"] == school]
+        learners_accuracy_data = learners_accuracy_data[
+            learners_accuracy_data["school"] == school
+        ]
 
     # Apply grade filter if 'grade' is provided
     if grade:
         # Filter the DataFrame to include only records of the specified 'grade'
-        median_accuracy_df = median_accuracy_df[median_accuracy_df["grade"] == grade]
+        learners_accuracy_data = learners_accuracy_data[
+            learners_accuracy_data["grade"] == grade
+        ]
 
     # Apply operation filter if 'operation' is provided
     if operation:
         # Filter the DataFrame to include only records of the specified 'operation'
-        median_accuracy_df = median_accuracy_df[
-            median_accuracy_df["operation"] == operation
+        learners_accuracy_data = learners_accuracy_data[
+            learners_accuracy_data["operation"] == operation
         ]
 
     # Apply tenant filter if 'tenant' is provided
     if tenant:
         # Filter the DataFrame to include only records of the specified 'tenant'
-        median_accuracy_df = median_accuracy_df[
-            median_accuracy_df["tenant_name"] == tenant
+        learners_accuracy_data = learners_accuracy_data[
+            learners_accuracy_data["tenant_name"] == tenant
+        ]
+
+    # Fetch the overall median accuracy of learners
+    overall_median_accuracy = get_overall_median_accuracy(
+        learners_accuracy_data.copy(), from_date, to_date
+    )
+
+    # Apply date filter if 'from_date' is provided
+    if from_date:
+        # Filter the DataFrame to include only records with dates on or after 'from_date'
+        learners_accuracy_data = learners_accuracy_data[
+            learners_accuracy_data["updated_at"].dt.date >= from_date
+        ]
+
+    # Apply date filter if 'to_date' is provided
+    if to_date:
+        # Filter the DataFrame to include only records with dates on or before 'to_date'
+        learners_accuracy_data = learners_accuracy_data[
+            learners_accuracy_data["updated_at"].dt.date <= to_date
         ]
 
     # Check if the DataFrame is not empty after all filters
-    if not median_accuracy_df.empty:
+    if not learners_accuracy_data.empty:
+        # Extract date from 'updated_at' column
+        learners_accuracy_data["updated_date"] = learners_accuracy_data[
+            "updated_at"
+        ].dt.date
+
         # Map week range to every entry based on date
-        median_accuracy_df.loc[:, "week_range"] = median_accuracy_df[
+        learners_accuracy_data.loc[:, "week_range"] = learners_accuracy_data[
             "updated_date"
         ].apply(lambda x: calculate_range(x))
 
         # Calculate the accuracy of every learner in respective weeks
         weekly_accuracy_per_learner = (
-            median_accuracy_df.groupby(["week_range", "learner_id"])
+            learners_accuracy_data.groupby(["week_range", "learner_id"], observed=True)
             .apply(
                 lambda x: pd.Series(
                     {
@@ -1425,6 +1391,7 @@ def get_median_accuracy(
             values="accuracy",
             columns="week_range",
             aggfunc=lambda x: round(x.median(), 2),
+            observed=True,
         ).reset_index(names=["metrics"])
         weekly_median_accuracy.loc[0, "metrics"] = "Median Accuracy Of Learners"
     else:
@@ -1459,10 +1426,10 @@ def get_median_accuracy(
 
 
 def get_median_time_for_grade_jump(
-    all_learners_data, from_date, to_date, school, grade, operation, tenant
+    from_date, to_date, school, grade, operation, tenant
 ):
     # Create a copy of the grade jump data to work with
-    grade_jump_df = get_grade_jump_data(all_learners_data)
+    grade_jump_df = get_grade_jump_data()
 
     # grade_jump_df = all_grade_jump_data.copy()
     # Filter learners of selected school
@@ -1491,7 +1458,8 @@ def get_median_time_for_grade_jump(
                     "qset_grade",
                     "operation_order",
                     "grade_order",
-                ]
+                ],
+                observed=True,
             )
             .agg(
                 total_time=("time_diff", "sum"),
@@ -1510,11 +1478,11 @@ def get_median_time_for_grade_jump(
 
         # Calculate the previous grade's time
         overall_grade_jump_df["previous_grade_time"] = overall_grade_jump_df.groupby(
-            ["learner_id", "operation"]
+            ["learner_id", "operation"], observed=True
         )["total_time"].shift(1)
         # Calculate the previous grade
         overall_grade_jump_df["previous_qset_grade"] = overall_grade_jump_df.groupby(
-            ["learner_id", "operation"]
+            ["learner_id", "operation"], observed=True
         )["qset_grade"].shift(1)
 
         final_overall_grad_jump_dt = overall_grade_jump_df[
@@ -1553,6 +1521,7 @@ def get_median_time_for_grade_jump(
             "previous_grade_time": lambda x: round(x.median(), 2),
             "learner_id": "nunique",
         },
+        observed=True,
     )
 
     if not grd_wise_overall_median_time.empty:
@@ -1617,6 +1586,7 @@ def get_median_time_for_grade_jump(
                 values="previous_grade_time",
                 aggfunc=lambda x: round(x.median(), 2),
                 fill_value="",
+                observed=True,
             )
             .astype(str)
             .reset_index(drop=True)
@@ -1630,6 +1600,7 @@ def get_median_time_for_grade_jump(
                 values="learner_id",
                 aggfunc="nunique",
                 fill_value="",
+                observed=True,
             )
             .astype(str)
             .reset_index(drop=True)
@@ -1671,6 +1642,7 @@ def get_median_time_for_grade_jump(
             "previous_grade_time": lambda x: round(x.median(), 2),
             "learner_id": "nunique",
         },
+        observed=True,
     )
 
     if not grd_wise_weekly_median_time.empty:
@@ -1745,15 +1717,13 @@ def get_median_time_for_grade_jump(
 #    - Median time taken by all learners to jump from **Addition** to **Subtraction** within a week.
 
 
-def get_median_time_for_operation_jump(
-    all_learners_data, from_date, to_date, school, grade, tenant
-):
+def get_median_time_for_operation_jump(from_date, to_date, school, grade, tenant):
     """
     This function calculates the median time taken for an operation jump across all operations and grades.
     It filters the data based on the provided grade and date range, calculates the median time for each operation jump,
     and returns the overall median time and the weekly median time for operation jumps.
     """
-    operator_jump_df = get_operator_jump_data(all_learners_data)
+    operator_jump_df = get_operator_jump_data()
     # operator_jump_df = all_operator_jump_data.copy()
 
     # Filter learners of selected school
@@ -1769,7 +1739,9 @@ def get_median_time_for_operation_jump(
     if not operator_jump_df.empty:
         # Calculate time in seconds taken by a learner on an operation
         overall_operator_jump_df = (
-            operator_jump_df.groupby(["learner_id", "operation", "operation_order"])
+            operator_jump_df.groupby(
+                ["learner_id", "operation", "operation_order"], observed=True
+            )
             .agg(
                 total_time=("time_diff", "sum"),
                 min_timestamp=("min_time", "min"),
@@ -1787,10 +1759,14 @@ def get_median_time_for_operation_jump(
 
         # Calculate the previous operation's time
         overall_operator_jump_df["previous_operation_time"] = (
-            overall_operator_jump_df.groupby(["learner_id"])["total_time"].shift(1)
+            overall_operator_jump_df.groupby(["learner_id"], observed=True)[
+                "total_time"
+            ].shift(1)
         )
         overall_operator_jump_df["previous_operation"] = (
-            overall_operator_jump_df.groupby(["learner_id"])["operation"].shift(1)
+            overall_operator_jump_df.groupby(["learner_id"], observed=True)[
+                "operation"
+            ].shift(1)
         )
 
         overall_operator_jump_df = overall_operator_jump_df[
@@ -1828,6 +1804,7 @@ def get_median_time_for_operation_jump(
             "previous_operation_time": lambda x: round(x.median(), 2),
             "learner_id": "nunique",
         },
+        observed=True,
     )
 
     if not operator_wise_overall_median_time.empty:
@@ -1886,6 +1863,7 @@ def get_median_time_for_operation_jump(
                 values="previous_operation_time",
                 aggfunc=lambda x: round(x.median(), 2),
                 fill_value="",
+                observed=True,
             )
             .astype(str)
             .reset_index(drop=True)
@@ -1898,6 +1876,7 @@ def get_median_time_for_operation_jump(
                 values="learner_id",
                 aggfunc="nunique",
                 fill_value="",
+                observed=True,
             )
             .astype(str)
             .reset_index(drop=True)
@@ -1938,6 +1917,7 @@ def get_median_time_for_operation_jump(
             "previous_operation_time": lambda x: round(x.median(), 2),
             "learner_id": "nunique",
         },
+        observed=True,
     )
 
     if not operator_wise_weekly_median_time.empty:
@@ -1987,7 +1967,6 @@ def get_median_time_for_operation_jump(
 
 
 def get_learners_metrics_data(
-    all_learners_data_df,
     from_date: str,
     to_date: str,
     school: str,
@@ -2007,45 +1986,11 @@ def get_learners_metrics_data(
     Returns:
     - final_table_df (DataFrame): A DataFrame containing the calculated metrics.
     """
-    # Fetch learners proficiency data
-    # all_learners_data_df = all_learners_data.copy()
-    print("Shape of all_learners_data_df: ", all_learners_data_df.shape)
 
-    # Determine the date range for calculation
-    if not (from_date and to_date):
-        # If no dates are provided, calculate the last 5 weeks from the current date
-        current_date = datetime.today()
-        most_recent_monday = current_date - timedelta(days=current_date.weekday())
-        past_5_weeks_date = most_recent_monday - timedelta(days=7 * 5)
-        from_date = past_5_weeks_date.date()
-    else:
-        # Convert provided dates to datetime format
-        from_date = pd.to_datetime(from_date).date()
-        to_date = pd.to_datetime(to_date).date()
-
-    # Identify learners who were active before the start date
-    previous_learners_list = all_learners_data_df[
-        all_learners_data_df["updated_at"].dt.date < from_date
-    ]["learner_id"].unique()
-
-    # Convert 'updated_at' to 'updated_date' for easier date-based operations
-    if not all_learners_data_df.empty:
-        all_learners_data_df["updated_date"] = all_learners_data_df[
-            "updated_at"
-        ].dt.date
-
-    """ UNIQUE LEARNERS LOGIC"""
+    """ UNIQUE LEARNERS LOGIC AND NEW LEARNERS ADDED LOGIC """
     # Calculate unique learners, weekly unique learners count, and final unique learners DataFrame
-    overall_unique_learners, weekly_uni_lrs_cnt_table, final_unique_learners_df = (
-        get_unique_learners(
-            all_learners_data_df, from_date, to_date, school, grade, operation, tenant
-        )
-    )
-
-    """ NEW LEARNERS ADDED LOGIC """
-    # Calculate new learners added
-    weekly_new_learners_added = get_new_learners_added(
-        final_unique_learners_df, previous_learners_list
+    overall_unique_learners, weekly_uni_lrs_cnt_table, weekly_new_learners_added = (
+        get_unique_learners(from_date, to_date, school, grade, operation, tenant)
     )
 
     """ LOGGED IN USERS LOGIC """
@@ -2057,44 +2002,41 @@ def get_learners_metrics_data(
     """ SESSIONS COUNT LOGIC"""
     # Calculate overall sessions and weekly sessions count
     overall_sessions, weekly_sessions_cnt_table = get_sessions(
-        all_learners_data_df, from_date, to_date, school, grade, tenant
+        from_date, to_date, school, grade, tenant
     )
 
-    """ WORK DONE LOGIC"""
-    # Calculate overall work done, weekly work done, and work done DataFrame
-    overall_work_done, weekly_work_done, work_done_df = get_work_done(
-        all_learners_data_df, from_date, to_date, school, grade, operation, tenant
-    )
-
-    """ WORK DONE PER LEARNER LOGIC"""
+    """ WORK DONE LOGIC & WORK DONE PER LEARNER LOGIC & MEDIAN WORK DONE PER LEARNER LOGIC"""
+    # Calculate overall work done and weekly work done
     # Calculate average work done per learner and weekly work done per learner
-    overall_work_done_avg, weekly_work_done_per_lr = get_avg_work_done_per_learner(
-        work_done_df, overall_work_done, overall_unique_learners
-    )
-
-    """ MEDIAN WORK DONE PER LEARNER LOGIC"""
     # Calculate median work done per learner
-    overall_median_work_done, weekly_median_work_done = (
-        get_median_work_done_per_learner(work_done_df)
+    (
+        overall_work_done,
+        weekly_work_done,
+        overall_work_done_avg,
+        weekly_work_done_per_lr,
+        overall_median_work_done,
+        weekly_median_work_done,
+    ) = get_work_done(
+        from_date, to_date, school, grade, operation, tenant, overall_unique_learners
     )
 
-    """ TOTAL TIME TAKEN LOGIC """
+    """ TOTAL TIME TAKEN LOGIC & AVERAGE TIME PER LEARNER LOGIC"""
     # Calculate overall time taken, weekly total time, and total time DataFrame
-    overall_time_taken, weekly_total_time, total_time_df = get_total_time_taken(
-        all_learners_data_df, from_date, to_date, school, grade, operation, tenant
-    )
-
-    """ AVERAGE TIME PER LEARNER LOGIC"""
     # Calculate average time taken per learner and weekly time taken per learner
-    overall_time_taken_avg, weekly_time_taken_per_lr = avg_time_taken_per_learner(
-        total_time_df, overall_time_taken, overall_unique_learners
+    (
+        overall_time_taken,
+        weekly_total_time,
+        overall_time_taken_avg,
+        weekly_time_taken_per_lr,
+    ) = get_total_time_taken(
+        from_date, to_date, school, grade, operation, tenant, overall_unique_learners
     )
 
     """MEDIAN ACCURACY OF LEARNERS LOGIC"""
 
     # Calculate median accuracy of learners
     overall_median_accuracy, weekly_median_accuracy = get_median_accuracy(
-        all_learners_data_df, from_date, to_date, school, grade, operation, tenant
+        from_date, to_date, school, grade, operation, tenant
     )
 
     """ MEDIAN TIME TAKEN FOR GRADE JUMP """
@@ -2102,16 +2044,14 @@ def get_learners_metrics_data(
     # Calculate median time taken for grade jump
     overall_median_grade_jump_time, weekly_grade_jump_median_time = (
         get_median_time_for_grade_jump(
-            all_learners_data_df, from_date, to_date, school, grade, operation, tenant
+            from_date, to_date, school, grade, operation, tenant
         )
     )
 
     """ MEDIAN TIME TAKEN FOR OPERATOR JUMP"""
     # Calculate median time taken for operator jump
     overall_median_operator_jump_time, weekly_operator_jump_median_time = (
-        get_median_time_for_operation_jump(
-            all_learners_data_df, from_date, to_date, school, grade, tenant
-        )
+        get_median_time_for_operation_jump(from_date, to_date, school, grade, tenant)
     )
 
     # Calculate final table data
@@ -2156,6 +2096,39 @@ def get_learners_metrics_data(
     return final_table_df
 
 
+def get_school_options():
+    # Get the list of schools from the database
+    school_options = [
+        {"label": school, "value": school} for school in get_schools_list()
+    ]
+    return school_options
+
+
+def get_grade_options():
+    # Get the list of grades from the database
+    grade_options = [
+        {"label": grade, "value": grade}
+        for grade in get_grades_list().sort_values(by="id")["grade"].unique()
+    ]
+    return grade_options
+
+
+def get_qset_type_options():
+    # Get the list of qset types from the database
+    qset_type_options = [
+        {"label": qset_type, "value": qset_type} for qset_type in get_qset_types_list()
+    ]
+    return qset_type_options
+
+
+def get_tenant_options():
+    # Get the list of tenants from the database
+    tenant_options = [
+        {"label": tenant, "value": tenant} for tenant in get_tenants_list()
+    ]
+    return tenant_options
+
+
 # Callback to update the master table based on selected filters
 @callback(
     Output("dig-lpm-learner-perf-data-table", "data"),
@@ -2166,15 +2139,6 @@ def get_learners_metrics_data(
     Output("dig-lpm-dates-picker", "min_date_allowed"),
     Output("dig-lpm-dates-picker", "max_date_allowed"),
     Output("dig-lpm-dates-picker", "initial_visible_month"),
-    Output("dig-lpm-schools-dropdown", "options"),
-    Output("dig-lpm-grades-dropdown", "options"),
-    Output("dig-lpm-tenants-dropdown", "options"),
-    Output("dig-ll-schools-dropdown", "options"),
-    Output("dig-ll-grades-dropdown", "options"),
-    Output("dig-ll-qset-purpose-dropdown", "options"),
-    Output("dig-li-schools-dropdown", "options"),
-    Output("dig-li-qset-grades-dropdown", "options"),
-    Output("dig-li-qset-purpose-dropdown", "options"),
     Input("dig-lpm-dates-picker", "start_date"),
     Input("dig-lpm-dates-picker", "end_date"),
     Input("dig-lpm-schools-dropdown", "value"),
@@ -2190,13 +2154,20 @@ def update_table(
     selected_operation,
     selected_tenant,
 ):
-    all_learners_data = get_all_learners_data_df()
 
-    print("What about here")
+    current_date = datetime.today()
+    # Determine the date range for calculation
+    if not (start_date and end_date):
+        # If no dates are provided, calculate the last 5 weeks from the current date
+        most_recent_monday = current_date - timedelta(days=current_date.weekday())
+        start_date = (most_recent_monday - timedelta(days=7 * 5)).date()
+    else:
+        # Convert provided dates to datetime format
+        start_date = pd.to_datetime(start_date).date()
+        end_date = pd.to_datetime(end_date).date()
 
     # Filter the DataFrame based on the selected schools, school_grades and learner_id
     filtered_data = get_learners_metrics_data(
-        all_learners_data,
         start_date,
         end_date,
         selected_school,
@@ -2204,16 +2175,6 @@ def update_table(
         selected_operation,
         selected_tenant,
     )
-
-    # Adjust start_date and end_date if not provided to default to the last 5 weeks
-    if not (start_date and end_date):
-        current_date = datetime.today()
-        most_recent_monday = current_date - timedelta(days=current_date.weekday())
-        start_date = (most_recent_monday - timedelta(days=7 * 5)).date()
-        end_date = current_date.date()
-    else:
-        start_date = pd.to_datetime(start_date).date()
-        end_date = pd.to_datetime(end_date).date()
 
     # Generate week ranges based on the selected date range
     week_columns = generate_week_ranges(start_date, end_date)
@@ -2251,23 +2212,9 @@ def update_table(
     ]
 
     last_synced_on_str = f"Last Synced On: {datetime.fromisoformat(last_synced_on).astimezone(IST).strftime('%d %b %Y %H:%M') if (last_synced_on := last_synced_time()) else '-'}"
-    last_record_updated_at_str = f"Last Record Updated At: {get_min_max_timestamp('max').astimezone(IST).strftime('%d %b %Y %H:%M')}"
-    min_date_allowed = get_min_max_timestamp("min").date()
-    max_date_allowed = get_min_max_timestamp("max").date()
-    school_options = [
-        {"label": school, "value": school} for school in get_schools_list()
-    ]
-    grades_options = [
-        {"label": school_grade, "value": school_grade}
-        for school_grade in get_grades_list().sort_values(by="id")["grade"].unique()
-    ]
-    qset_type_options = [
-        {"label": qset_type, "value": qset_type} for qset_type in get_qset_types_list()
-    ]
-
-    tenant_options = [
-        {"label": tenant, "value": tenant} for tenant in get_tenants_list()
-    ]
+    last_record_updated_at_str = f"Last Record Updated At: {datetime.fromisoformat(get_min_max_timestamp('max')).astimezone(IST).strftime('%d %b %Y %H:%M')}"
+    min_date_allowed = datetime.fromisoformat(get_min_max_timestamp("min")).date()
+    max_date_allowed = datetime.fromisoformat(get_min_max_timestamp("max")).date()
 
     return (
         filtered_data.to_dict("records"),
@@ -2278,15 +2225,6 @@ def update_table(
         min_date_allowed,
         max_date_allowed,
         max_date_allowed,
-        school_options,
-        grades_options,
-        tenant_options,
-        school_options,
-        grades_options,
-        qset_type_options,
-        school_options,
-        grades_options,
-        qset_type_options,
     )  # Return the filtered data
 
 
@@ -2346,6 +2284,7 @@ def update_selected_dates(start_date, end_date):
     Input("dig-lpm-grades-dropdown", "value"),
     Input("dig-lpm-operations-dropdown", "value"),
     Input("dig-lpm-tenants-dropdown", "value"),
+    prevent_initial_call=True,
 )
 def update_learners_list_table(
     active_cell,
@@ -2360,9 +2299,6 @@ def update_learners_list_table(
     parent_operation,
     parent_tenant,
 ):
-    all_learners_data = get_all_learners_data_df()
-    print("Updating learners list table")
-
     # Initialize the learners attempt table data and other variables
     learners_attempt_table_data = pd.DataFrame(columns=["learner_id", "grade"])
     hidden = True
@@ -2389,10 +2325,27 @@ def update_learners_list_table(
             if selected_operation:
                 operation = selected_operation
 
+            all_learners_data = get_all_learners_data_df()[
+                [
+                    "updated_at",
+                    "school",
+                    "operation",
+                    "grade",
+                    "tenant_name",
+                    "learner_id",
+                    "learner_name",
+                    "learner_username",
+                    "attempts_count",
+                    "score",
+                    "qset_grade",
+                    "purpose",
+                ]
+            ]
+
             # Filter the learners attempts data based on the operation
             learners_attempts_data = all_learners_data[
                 all_learners_data["operation"] == operation
-            ].copy()
+            ]
 
             # If no operation is selected and a parent operation is present, filter the data based on the parent operation
             if not selected_operation and parent_operation:
@@ -2471,7 +2424,8 @@ def update_learners_list_table(
                             "learner_username",
                             "grade",
                             "qset_grade",
-                        ]
+                        ],
+                        observed=True,
                     )
                     .agg(
                         questions_attempted=("attempts_count", "count"),
@@ -2487,12 +2441,14 @@ def update_learners_list_table(
                     index="learner_id",
                     columns="qset_grade",
                     values="questions_attempted",
+                    observed=True,
                 )
 
                 accuracy_data = grouped_data.pivot_table(
                     index="learner_id",
                     columns="qset_grade",
                     values="accuracy",
+                    observed=True,
                 ).rename(
                     columns={
                         "class-one": "class-one-avg",
@@ -2529,7 +2485,6 @@ def update_learners_list_table(
                         learner_username_mapping
                     )
                 )
-
     # Return the learners attempt table data, hidden flag, and selected filters
     return learners_attempt_table_data.to_dict("records"), hidden, selected_filters
 
@@ -2546,6 +2501,7 @@ def update_learners_list_table(
     Input("dig-li-qset-grades-dropdown", "value"),
     Input("dig-li-operations-dropdown", "value"),
     Input("dig-li-qset-purpose-dropdown", "value"),
+    prevent_initial_call=True,
 )
 def update_learner_info_table(
     active_cell,
@@ -2555,8 +2511,6 @@ def update_learner_info_table(
     operation,
     qset_types,
 ):
-    all_learners_data = get_all_learners_data_df()
-    all_learners_data.drop(columns=["sequence"], inplace=True)
 
     # Initialize the learners performance data and other variables
     learners_perf_data = pd.DataFrame(
@@ -2579,14 +2533,29 @@ def update_learner_info_table(
         if column == "learner_id":
             hidden = False
             learner_id = data[active_cell["row"]]["learner_id"]
+            selected_learner_data = get_all_learners_data_df()[
+                [
+                    "updated_at",
+                    "learner_id",
+                    "learner_username",
+                    "purpose",
+                    "qset_grade",
+                    "operation",
+                    "question_id",
+                    "question_set_id",
+                    "qset_name",
+                    "attempts_count",
+                    "score",
+                ]
+            ]
             if not learner_uni_name:
-                selected_learner_data = all_learners_data[
-                    all_learners_data["learner_id"] == learner_id
+                selected_learner_data = selected_learner_data[
+                    selected_learner_data["learner_id"] == learner_id
                 ].copy()
             else:
                 learner_username, learner_name = learner_uni_name.split("-")
-                selected_learner_data = all_learners_data[
-                    all_learners_data["learner_username"] == learner_username
+                selected_learner_data = selected_learner_data[
+                    selected_learner_data["learner_username"] == learner_username
                 ].copy()
             heading = f"SELECTED LEARNER :- ID: {learner_id} , Grade: {data[active_cell['row']]['grade']}"
 
@@ -2608,7 +2577,7 @@ def update_learner_info_table(
 
             # Check if the selected learner data is not empty
             if not selected_learner_data.empty:
-                question_sequence_data = get_question_sequence_data()
+                question_sequence_data = get_question_sequence_data_df()
                 selected_learner_data = selected_learner_data.merge(
                     question_sequence_data,
                     how="left",
@@ -2620,7 +2589,8 @@ def update_learner_info_table(
                 ].dt.date
                 learners_qset_data = (
                     selected_learner_data.groupby(
-                        ["learner_id", "question_set_id", "qset_name", "updated_date"]
+                        ["learner_id", "question_set_id", "qset_name", "updated_date"],
+                        observed=True,
                     )
                     .apply(
                         lambda gp: pd.Series(
@@ -2651,7 +2621,7 @@ def update_learner_info_table(
                 ].clip(upper=2700)
                 learners_perf_data = (
                     learners_qset_data.groupby(
-                        ["learner_id", "question_set_id", "qset_name"]
+                        ["learner_id", "question_set_id", "qset_name"], observed=True
                     )
                     .agg(
                         total_questions_attempted=("questions_attempted", "sum"),
@@ -2683,423 +2653,441 @@ def update_learner_info_table(
                 learners_perf_data.loc[
                     learners_perf_data.index[-1] :, "attempted_date"
                 ] = "in progress"
-
     return learners_perf_data.to_dict("records"), hidden, heading
 
 
 ###################################  Digital Master Dashboard Layout ###################################
 
-layout = html.Div(
-    [
-        html.H1("Master Dashboard"),
-        html.Div(
-            [
-                html.H5(
-                    id="last-synced-on",
-                    style={"margin": "0px"},
-                ),
-                html.H5(
-                    id="last-record-updated-at",
-                    style={"margin": "0px"},
-                ),
-            ],
-            style={
-                "display": "flex",
-                "flexDirection": "column",  # Stack vertically
-                "alignItems": "flex-end",  # Align text to the right
-                "flexWrap": "wrap",
-            },
-        ),
-        html.Div(
-            [
-                # Clear Dates Button
-                html.Button(
-                    "Clear Dates",
-                    id="dig-lpm-clear-dates-button",
-                    n_clicks=0,
-                    style={
-                        "marginRight": "10px",
-                        "height": "55px",
-                        "width": "55px",
-                        "borderRadius": "35%",
-                        "background": "linear-gradient(to right, #EDEDED, #DCDCDC)",
-                        "border": "2px solid black",
-                        "cursor": "pointer",
-                    },
-                ),
-                dcc.DatePickerRange(id="dig-lpm-dates-picker", minimum_nights=0),
-                # Dropdown for selecting school
-                dcc.Dropdown(
-                    id="dig-lpm-schools-dropdown",
-                    placeholder="Select School",
-                    style={"width": "300px", "margin": "10px"},
-                ),
-                # Dropdown for selecting grade
-                dcc.Dropdown(
-                    id="dig-lpm-grades-dropdown",
-                    placeholder="Select Grade",
-                    style={"width": "300px", "margin": "10px"},
-                ),
-                # Dropdown for selecting operations
-                dcc.Dropdown(
-                    id="dig-lpm-operations-dropdown",
-                    options=[
-                        {"label": operation, "value": operation}
-                        for operation in [
-                            "Addition",
-                            "Subtraction",
-                            "Multiplication",
-                            "Division",
-                        ]
-                    ],
-                    placeholder="Select Operation",
-                    style={"width": "300px", "margin": "10px"},
-                ),
-                # Dropdown for selecting tenants
-                dcc.Dropdown(
-                    id="dig-lpm-tenants-dropdown",
-                    placeholder="Select Tenant",
-                    style={"width": "300px", "margin": "10px"},
-                ),
-            ],
-            style={
-                "display": "flex",
-                "justifyContent": "flex-start",  # Center items horizontally
-                "alignItems": "center",  # Align items vertically
-                "flexWrap": "wrap",  # Allow items to wrap to the next line if needed
-                "marginBottom": "10px",
-            },
-        ),
-        html.Div(
-            id="dig-lpm-selected-date(s)",
-            style={"margin": "10px 0px", "fontSize": "16px"},
-        ),
-        # DataTable to display the filtered data
-        dcc.Loading(
-            id="dig-lpm-loading-table",
-            type="circle",
-            children=[
-                dash_table.DataTable(
-                    id="dig-lpm-learner-perf-data-table",
-                    style_table={
-                        "overflowX": "auto",
-                        "maxWidth": "100%",
-                        "marginBottom": "50px",
-                    },
-                    style_data={
-                        "whiteSpace": "pre-wrap",  # Preserve newlines
-                        "height": "auto",  # Adjust row height
-                        "textAlign": "center",
-                        "border": "1px solid black",
-                    },
-                    style_header={
-                        "fontWeight": "bold",
-                        "color": "black",
-                        "border": "1px solid #004494",
-                        "backgroundColor": "#A3C1E0",
-                        "whiteSpace": "normal",
-                        "height": "auto",
-                        "position": "sticky",
-                        "top": "0",
-                        # "zIndex": "1",
-                        "text-align": "center",
-                    },  # Sticky header
-                    data=[],
-                    style_cell={
-                        "textAlign": "center",
-                        "minWidth": "150px",
-                        "maxWidth": "300px",
-                        "overflow": "hidden",
-                        "textOverflow": "ellipsis",
-                    },
-                )
-            ],
-        ),
-        # DataTable to display the filtered data
-        html.Div(
-            id="dig-ll-div",
-            children=[
-                html.H4(id="dig-ll-selected-filters", style={"margin": "10px 10px"}),
-                html.Div(
-                    [
-                        # Dropdown for selecting school
-                        dcc.Dropdown(
-                            id="dig-ll-schools-dropdown",
-                            placeholder="Select School",
-                            style={"width": "300px", "margin": "10px"},
-                        ),
-                        # Dropdown for selecting grade
-                        dcc.Dropdown(
-                            id="dig-ll-grades-dropdown",
-                            placeholder="Select Grade",
-                            style={"width": "300px", "margin": "10px"},
-                        ),
-                        # Dropdown for selecting operations
-                        dcc.Dropdown(
-                            id="dig-ll-operations-dropdown",
-                            options=[
-                                {"label": operation, "value": operation}
-                                for operation in [
-                                    "Addition",
-                                    "Subtraction",
-                                    "Multiplication",
-                                    "Division",
-                                ]
-                            ],
-                            placeholder="Select Operation",
-                            style={"width": "300px", "margin": "10px"},
-                        ),
-                        dcc.Dropdown(
-                            id="dig-ll-qset-purpose-dropdown",
-                            multi=True,
-                            placeholder="Select Question Set Type",
-                            style={"width": "300px", "margin": "10px"},
-                        ),
-                    ],
-                    style={
-                        "display": "flex",
-                        "flexWrap": "wrap",
-                        "margin": "0px 10px",
-                        "alignItems": "center",
-                    },
-                ),
-                dcc.Loading(
-                    id="dig-ll-loading-table",
-                    type="circle",
-                    children=[
-                        dash_table.DataTable(
-                            id="dig-learners-list-data-table",
-                            columns=[
-                                {"name": ["", "Learner ID"], "id": "learner_id"},
-                                {"name": ["", "Name"], "id": "learner_name"},
-                                {"name": ["", "Username"], "id": "learner_username"},
-                                {"name": ["", "class"], "id": "grade"},
-                                {
-                                    "name": ["Attempt Data", "class-one"],
-                                    "id": "class-one",
-                                },
-                                {
-                                    "name": ["Attempt Data", "class-two"],
-                                    "id": "class-two",
-                                },
-                                {
-                                    "name": ["Attempt Data", "class-three"],
-                                    "id": "class-three",
-                                },
-                                {
-                                    "name": ["Attempt Data", "class-four"],
-                                    "id": "class-four",
-                                },
-                                {
-                                    "name": ["Attempt Data", "class-five"],
-                                    "id": "class-five",
-                                },
-                                {
-                                    "name": ["Accuracy (%)", "class-one"],
-                                    "id": "class-one-avg",
-                                },
-                                {
-                                    "name": ["Accuracy (%)", "class-two"],
-                                    "id": "class-two-avg",
-                                },
-                                {
-                                    "name": ["Accuracy (%)", "class-three"],
-                                    "id": "class-three-avg",
-                                },
-                                {
-                                    "name": ["Accuracy (%)", "class-four"],
-                                    "id": "class-four-avg",
-                                },
-                                {
-                                    "name": ["Accuracy (%)", "class-five"],
-                                    "id": "class-five-avg",
-                                },
-                            ],
-                            merge_duplicate_headers=True,
-                            style_table={
-                                "overflowX": "auto",
-                                "overflowY": "auto",
-                                "maxWidth": "100%",
-                                "marginBottom": "30px",
-                                "maxHeight": "500px",
-                            },
-                            style_data={
-                                "whiteSpace": "pre-wrap",  # Preserve newlines
-                                "height": "auto",  # Adjust row height
-                                "textAlign": "center",
-                                "border": "1px solid black",
-                            },
-                            style_header={
-                                "fontWeight": "bold",
-                                "color": "black",
-                                "border": "1px solid #004494",
-                                "backgroundColor": "#A3C1E0",
-                                "whiteSpace": "normal",
-                                "height": "auto",
-                                "position": "sticky",
-                                "top": "0",
-                                # "zIndex": "1",
-                                "text-align": "center",
-                            },  # Sticky header
-                            page_size=20,  # Set the number of rows per page
-                            data=[],
-                            style_cell={
-                                "textAlign": "center",
-                                "minWidth": "150px",
-                                "maxWidth": "300px",
-                                "overflow": "hidden",
-                                "textOverflow": "ellipsis",
-                            },
-                            style_data_conditional=[
-                                *(
-                                    {
-                                        "if": {
-                                            "column_id": id,
-                                        },
-                                        "backgroundColor": "#CDD6DF",
-                                    }
-                                    for id in [
-                                        "class-one",
-                                        "class-two",
-                                        "class-three",
-                                        "class-four",
-                                        "class-five",
+
+def master_layout():
+    return html.Div(
+        [
+            html.H1("Master Dashboard"),
+            html.Div(
+                [
+                    html.H5(
+                        id="last-synced-on",
+                        style={"margin": "0px"},
+                    ),
+                    html.H5(
+                        id="last-record-updated-at",
+                        style={"margin": "0px"},
+                    ),
+                ],
+                style={
+                    "display": "flex",
+                    "flexDirection": "column",  # Stack vertically
+                    "alignItems": "flex-end",  # Align text to the right
+                    "flexWrap": "wrap",
+                },
+            ),
+            html.Div(
+                [
+                    # Clear Dates Button
+                    html.Button(
+                        "Clear Dates",
+                        id="dig-lpm-clear-dates-button",
+                        n_clicks=0,
+                        style={
+                            "marginRight": "10px",
+                            "height": "55px",
+                            "width": "55px",
+                            "borderRadius": "35%",
+                            "background": "linear-gradient(to right, #EDEDED, #DCDCDC)",
+                            "border": "2px solid black",
+                            "cursor": "pointer",
+                        },
+                    ),
+                    dcc.DatePickerRange(id="dig-lpm-dates-picker", minimum_nights=0),
+                    # Dropdown for selecting school
+                    dcc.Dropdown(
+                        id="dig-lpm-schools-dropdown",
+                        placeholder="Select School",
+                        options=get_school_options(),
+                        style={"width": "300px", "margin": "10px"},
+                    ),
+                    # Dropdown for selecting grade
+                    dcc.Dropdown(
+                        id="dig-lpm-grades-dropdown",
+                        placeholder="Select Grade",
+                        options=get_grade_options(),
+                        style={"width": "300px", "margin": "10px"},
+                    ),
+                    # Dropdown for selecting operations
+                    dcc.Dropdown(
+                        id="dig-lpm-operations-dropdown",
+                        options=[
+                            {"label": operation, "value": operation}
+                            for operation in [
+                                "Addition",
+                                "Subtraction",
+                                "Multiplication",
+                                "Division",
+                            ]
+                        ],
+                        placeholder="Select Operation",
+                        style={"width": "300px", "margin": "10px"},
+                    ),
+                    # Dropdown for selecting tenants
+                    dcc.Dropdown(
+                        id="dig-lpm-tenants-dropdown",
+                        placeholder="Select Tenant",
+                        options=get_tenant_options(),
+                        style={"width": "300px", "margin": "10px"},
+                    ),
+                ],
+                style={
+                    "display": "flex",
+                    "justifyContent": "flex-start",  # Center items horizontally
+                    "alignItems": "center",  # Align items vertically
+                    "flexWrap": "wrap",  # Allow items to wrap to the next line if needed
+                    "marginBottom": "10px",
+                },
+            ),
+            html.Div(
+                id="dig-lpm-selected-date(s)",
+                style={"margin": "10px 0px", "fontSize": "16px"},
+            ),
+            # DataTable to display the filtered data
+            dcc.Loading(
+                id="dig-lpm-loading-table",
+                type="circle",
+                children=[
+                    dash_table.DataTable(
+                        id="dig-lpm-learner-perf-data-table",
+                        style_table={
+                            "overflowX": "auto",
+                            "maxWidth": "100%",
+                            "marginBottom": "50px",
+                        },
+                        style_data={
+                            "whiteSpace": "pre-wrap",  # Preserve newlines
+                            "height": "auto",  # Adjust row height
+                            "textAlign": "center",
+                            "border": "1px solid black",
+                        },
+                        style_header={
+                            "fontWeight": "bold",
+                            "color": "black",
+                            "border": "1px solid #004494",
+                            "backgroundColor": "#A3C1E0",
+                            "whiteSpace": "normal",
+                            "height": "auto",
+                            "position": "sticky",
+                            "top": "0",
+                            # "zIndex": "1",
+                            "text-align": "center",
+                        },  # Sticky header
+                        data=[],
+                        style_cell={
+                            "textAlign": "center",
+                            "minWidth": "150px",
+                            "maxWidth": "300px",
+                            "overflow": "hidden",
+                            "textOverflow": "ellipsis",
+                        },
+                    )
+                ],
+            ),
+            # DataTable to display the filtered data
+            html.Div(
+                id="dig-ll-div",
+                children=[
+                    html.H4(
+                        id="dig-ll-selected-filters", style={"margin": "10px 10px"}
+                    ),
+                    html.Div(
+                        [
+                            # Dropdown for selecting school
+                            dcc.Dropdown(
+                                id="dig-ll-schools-dropdown",
+                                placeholder="Select School",
+                                options=get_school_options(),
+                                style={"width": "300px", "margin": "10px"},
+                            ),
+                            # Dropdown for selecting grade
+                            dcc.Dropdown(
+                                id="dig-ll-grades-dropdown",
+                                placeholder="Select Grade",
+                                options=get_grade_options(),
+                                style={"width": "300px", "margin": "10px"},
+                            ),
+                            # Dropdown for selecting operations
+                            dcc.Dropdown(
+                                id="dig-ll-operations-dropdown",
+                                options=[
+                                    {"label": operation, "value": operation}
+                                    for operation in [
+                                        "Addition",
+                                        "Subtraction",
+                                        "Multiplication",
+                                        "Division",
                                     ]
-                                ),
-                                *(
+                                ],
+                                placeholder="Select Operation",
+                                style={"width": "300px", "margin": "10px"},
+                            ),
+                            dcc.Dropdown(
+                                id="dig-ll-qset-purpose-dropdown",
+                                multi=True,
+                                placeholder="Select Question Set Type",
+                                options=get_qset_type_options(),
+                                style={"width": "300px", "margin": "10px"},
+                            ),
+                        ],
+                        style={
+                            "display": "flex",
+                            "flexWrap": "wrap",
+                            "margin": "0px 10px",
+                            "alignItems": "center",
+                        },
+                    ),
+                    dcc.Loading(
+                        id="dig-ll-loading-table",
+                        type="circle",
+                        children=[
+                            dash_table.DataTable(
+                                id="dig-learners-list-data-table",
+                                columns=[
+                                    {"name": ["", "Learner ID"], "id": "learner_id"},
+                                    {"name": ["", "Name"], "id": "learner_name"},
                                     {
-                                        "if": {
-                                            "column_id": id,
-                                        },
-                                        "backgroundColor": "#BEC7D0",
-                                    }
-                                    for id in [
-                                        "class-one-avg",
-                                        "class-two-avg",
-                                        "class-three-avg",
-                                        "class-four-avg",
-                                        "class-five-avg",
-                                    ]
-                                ),
-                            ],
-                        ),
-                    ],
-                ),
-                html.Div(
-                    id="dig-li-div",
-                    children=[
-                        html.H4(id="dig-li-heading", style={"margin": "10px 10px"}),
-                        html.Div(
-                            [
-                                # Dropdown for selecting school
-                                dcc.Dropdown(
-                                    id="dig-li-schools-dropdown",
-                                    placeholder="Select School",
-                                    style={"width": "300px", "margin": "10px"},
-                                ),
-                                # Dropdown for selecting learner_id
-                                dcc.Dropdown(
-                                    id="dig-li-learner-dropdown",
-                                    placeholder="Select Learner",
-                                    style={"width": "300px", "margin": "10px"},
-                                ),
-                                # Dropdown for selecting grade
-                                dcc.Dropdown(
-                                    id="dig-li-qset-grades-dropdown",
-                                    placeholder="Select Qset Grade",
-                                    style={"width": "300px", "margin": "10px"},
-                                ),
-                                # Dropdown for selecting operations
-                                dcc.Dropdown(
-                                    id="dig-li-operations-dropdown",
-                                    options=[
-                                        {"label": operation, "value": operation}
-                                        for operation in [
-                                            "Addition",
-                                            "Subtraction",
-                                            "Multiplication",
-                                            "Division",
+                                        "name": ["", "Username"],
+                                        "id": "learner_username",
+                                    },
+                                    {"name": ["", "class"], "id": "grade"},
+                                    {
+                                        "name": ["Attempt Data", "class-one"],
+                                        "id": "class-one",
+                                    },
+                                    {
+                                        "name": ["Attempt Data", "class-two"],
+                                        "id": "class-two",
+                                    },
+                                    {
+                                        "name": ["Attempt Data", "class-three"],
+                                        "id": "class-three",
+                                    },
+                                    {
+                                        "name": ["Attempt Data", "class-four"],
+                                        "id": "class-four",
+                                    },
+                                    {
+                                        "name": ["Attempt Data", "class-five"],
+                                        "id": "class-five",
+                                    },
+                                    {
+                                        "name": ["Accuracy (%)", "class-one"],
+                                        "id": "class-one-avg",
+                                    },
+                                    {
+                                        "name": ["Accuracy (%)", "class-two"],
+                                        "id": "class-two-avg",
+                                    },
+                                    {
+                                        "name": ["Accuracy (%)", "class-three"],
+                                        "id": "class-three-avg",
+                                    },
+                                    {
+                                        "name": ["Accuracy (%)", "class-four"],
+                                        "id": "class-four-avg",
+                                    },
+                                    {
+                                        "name": ["Accuracy (%)", "class-five"],
+                                        "id": "class-five-avg",
+                                    },
+                                ],
+                                merge_duplicate_headers=True,
+                                style_table={
+                                    "overflowX": "auto",
+                                    "overflowY": "auto",
+                                    "maxWidth": "100%",
+                                    "marginBottom": "30px",
+                                    "maxHeight": "500px",
+                                },
+                                style_data={
+                                    "whiteSpace": "pre-wrap",  # Preserve newlines
+                                    "height": "auto",  # Adjust row height
+                                    "textAlign": "center",
+                                    "border": "1px solid black",
+                                },
+                                style_header={
+                                    "fontWeight": "bold",
+                                    "color": "black",
+                                    "border": "1px solid #004494",
+                                    "backgroundColor": "#A3C1E0",
+                                    "whiteSpace": "normal",
+                                    "height": "auto",
+                                    "position": "sticky",
+                                    "top": "0",
+                                    # "zIndex": "1",
+                                    "text-align": "center",
+                                },  # Sticky header
+                                page_size=20,  # Set the number of rows per page
+                                data=[],
+                                style_cell={
+                                    "textAlign": "center",
+                                    "minWidth": "150px",
+                                    "maxWidth": "300px",
+                                    "overflow": "hidden",
+                                    "textOverflow": "ellipsis",
+                                },
+                                style_data_conditional=[
+                                    *(
+                                        {
+                                            "if": {
+                                                "column_id": id,
+                                            },
+                                            "backgroundColor": "#CDD6DF",
+                                        }
+                                        for id in [
+                                            "class-one",
+                                            "class-two",
+                                            "class-three",
+                                            "class-four",
+                                            "class-five",
                                         ]
-                                    ],
-                                    placeholder="Select Operation",
-                                    style={"width": "300px", "margin": "10px"},
-                                ),
-                                dcc.Dropdown(
-                                    id="dig-li-qset-purpose-dropdown",
-                                    multi=True,
-                                    placeholder="Select Question Set Type",
-                                    style={"width": "300px", "margin": "10px"},
-                                ),
-                            ],
-                            style={
-                                "display": "flex",
-                                "flexWrap": "wrap",
-                                "margin": "0px 10px",
-                                "alignItems": "center",
-                            },
-                        ),
-                        dcc.Loading(
-                            id="dig-li-loading-table",
-                            type="circle",
-                            children=[
-                                dash_table.DataTable(
-                                    id="dig-learner-info-table",
-                                    columns=[
-                                        {"name": "Set Name", "id": "qset_name"},
+                                    ),
+                                    *(
                                         {
-                                            "name": "Attempt Data",
-                                            "id": "total_questions_attempted",
+                                            "if": {
+                                                "column_id": id,
+                                            },
+                                            "backgroundColor": "#BEC7D0",
+                                        }
+                                        for id in [
+                                            "class-one-avg",
+                                            "class-two-avg",
+                                            "class-three-avg",
+                                            "class-four-avg",
+                                            "class-five-avg",
+                                        ]
+                                    ),
+                                ],
+                            ),
+                        ],
+                    ),
+                    html.Div(
+                        id="dig-li-div",
+                        children=[
+                            html.H4(id="dig-li-heading", style={"margin": "10px 10px"}),
+                            html.Div(
+                                [
+                                    # Dropdown for selecting school
+                                    dcc.Dropdown(
+                                        id="dig-li-schools-dropdown",
+                                        placeholder="Select School",
+                                        options=get_school_options(),
+                                        style={"width": "300px", "margin": "10px"},
+                                    ),
+                                    # Dropdown for selecting learner_id
+                                    dcc.Dropdown(
+                                        id="dig-li-learner-dropdown",
+                                        placeholder="Select Learner",
+                                        style={"width": "300px", "margin": "10px"},
+                                    ),
+                                    # Dropdown for selecting grade
+                                    dcc.Dropdown(
+                                        id="dig-li-qset-grades-dropdown",
+                                        placeholder="Select Qset Grade",
+                                        options=get_grade_options(),
+                                        style={"width": "300px", "margin": "10px"},
+                                    ),
+                                    # Dropdown for selecting operations
+                                    dcc.Dropdown(
+                                        id="dig-li-operations-dropdown",
+                                        options=[
+                                            {"label": operation, "value": operation}
+                                            for operation in [
+                                                "Addition",
+                                                "Subtraction",
+                                                "Multiplication",
+                                                "Division",
+                                            ]
+                                        ],
+                                        placeholder="Select Operation",
+                                        style={"width": "300px", "margin": "10px"},
+                                    ),
+                                    dcc.Dropdown(
+                                        id="dig-li-qset-purpose-dropdown",
+                                        multi=True,
+                                        placeholder="Select Question Set Type",
+                                        options=get_qset_type_options(),
+                                        style={"width": "300px", "margin": "10px"},
+                                    ),
+                                ],
+                                style={
+                                    "display": "flex",
+                                    "flexWrap": "wrap",
+                                    "margin": "0px 10px",
+                                    "alignItems": "center",
+                                },
+                            ),
+                            dcc.Loading(
+                                id="dig-li-loading-table",
+                                type="circle",
+                                children=[
+                                    dash_table.DataTable(
+                                        id="dig-learner-info-table",
+                                        columns=[
+                                            {"name": "Set Name", "id": "qset_name"},
+                                            {
+                                                "name": "Attempt Data",
+                                                "id": "total_questions_attempted",
+                                            },
+                                            {"name": "Accuracy (%)", "id": "accuracy"},
+                                            {
+                                                "name": "Date Attempted",
+                                                "id": "attempted_date",
+                                            },
+                                            {"name": "Time Taken", "id": "time_taken"},
+                                            {
+                                                "name": "Sequence Of Wrong Questions",
+                                                "id": "incorrect_attempts",
+                                            },
+                                        ],
+                                        style_table={
+                                            "overflowX": "auto",
+                                            "overflowY": "auto",
+                                            "maxWidth": "100%",
+                                            "marginBottom": "50px",
+                                            "maxHeight": "500px",
                                         },
-                                        {"name": "Accuracy (%)", "id": "accuracy"},
-                                        {
-                                            "name": "Date Attempted",
-                                            "id": "attempted_date",
+                                        style_data={
+                                            "whiteSpace": "pre-wrap",  # Preserve newlines
+                                            "height": "auto",  # Adjust row height
+                                            "textAlign": "center",
                                         },
-                                        {"name": "Time Taken", "id": "time_taken"},
-                                        {
-                                            "name": "Sequence Of Wrong Questions",
-                                            "id": "incorrect_attempts",
+                                        style_header={
+                                            "fontWeight": "bold",
+                                            "color": "black",
+                                            "border": "1px solid #004494",
+                                            "backgroundColor": "#A3C1E0",
+                                            "whiteSpace": "normal",
+                                            "height": "auto",
+                                            "position": "sticky",
+                                            "top": "0",
+                                            # "zIndex": "1",
+                                            "text-align": "center",
+                                        },  # Sticky header
+                                        page_size=20,  # Set the number of rows per page
+                                        data=[],
+                                        style_cell={
+                                            "textAlign": "center",
+                                            "minWidth": "150px",
+                                            "maxWidth": "200px",
+                                            "overflowX": "auto",
+                                            # "textOverflow": "ellipsis",
                                         },
-                                    ],
-                                    style_table={
-                                        "overflowX": "auto",
-                                        "overflowY": "auto",
-                                        "maxWidth": "100%",
-                                        "marginBottom": "50px",
-                                        "maxHeight": "500px",
-                                    },
-                                    style_data={
-                                        "whiteSpace": "pre-wrap",  # Preserve newlines
-                                        "height": "auto",  # Adjust row height
-                                        "textAlign": "center",
-                                    },
-                                    style_header={
-                                        "fontWeight": "bold",
-                                        "color": "black",
-                                        "border": "1px solid #004494",
-                                        "backgroundColor": "#A3C1E0",
-                                        "whiteSpace": "normal",
-                                        "height": "auto",
-                                        "position": "sticky",
-                                        "top": "0",
-                                        # "zIndex": "1",
-                                        "text-align": "center",
-                                    },  # Sticky header
-                                    page_size=20,  # Set the number of rows per page
-                                    data=[],
-                                    style_cell={
-                                        "textAlign": "center",
-                                        "minWidth": "150px",
-                                        "maxWidth": "200px",
-                                        "overflowX": "auto",
-                                        # "textOverflow": "ellipsis",
-                                    },
-                                )
-                            ],
-                        ),
-                    ],
-                ),
-            ],
-        ),
-    ]
-)
+                                    )
+                                ],
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+        ]
+    )
+
+
+layout = master_layout

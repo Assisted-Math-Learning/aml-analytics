@@ -1,13 +1,15 @@
-import config
 import gzip
-import pandas as pd
 import pickle
-import redis
-from datetime import datetime, timedelta
-from sqlalchemy import create_engine, exc
-from sqlalchemy.pool import QueuePool
-from sqlalchemy.orm import sessionmaker
 import time
+from datetime import datetime, timedelta
+
+import pandas as pd
+import redis
+from sqlalchemy import create_engine, exc
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import QueuePool
+
+import config
 
 # Create the connection string for the database
 connection_string = f"postgresql://{config.DB_USER}:{config.DB_PASSWORD}@{config.DB_HOST}:{config.DB_PORT}/{config.DB_NAME}"
@@ -35,34 +37,37 @@ redis_client = redis.Redis(
 # Key names
 ALL_LEARNER_DATA_KEY = "learners_data_json"
 LAST_FETCHED_TIME_KEY = "last_fetched_time"
+MAX_TIME_KEY = "max_time"
+MIN_TIME_KEY = "min_time"
 LAST_QUESTION_PER_QSET_GRADE_KEY = "last_question_per_qset_grade"
 ALL_LEARNERS_KEY = "all_learners"
 ALL_GRADES_KEY = "all_grades"
 ALL_SCHOOLS_KEY = "all_schools"
 ALL_QSET_TYPES_KEY = "all_qset_types"
 ALL_REPOSITORY_NAMES_KEY = "all_repository_names"
-ALL_L1_SKILLS_KEY = "all_l1_skills"
-ALL_L2_SKILLS_KEY = "all_l2_skills"
-ALL_L3_SKILLS_KEY = "all_l3_skills"
+ALL_SKILLS_KEY = "all_skills"
 ALL_TENANTS_KEY = "all_tenants"
 ALL_LOGGED_IN_USERS_KEY = "all_logged_in_users"
+ALL_QUESTION_SEQUENCE_DATA = "all_question_sequence_data"
 
 
-def execute_query_with_retry(query, max_retries=3, delay=1):
-    """
-    Executes a SQL query with retries for transient errors.
-    """
-    session = Session()
+def execute_query_with_retry(query, max_retries=3, delay=1, dtype=None):
+    conn = engine.connect().execution_options(stream_results=True)
+
     for attempt in range(max_retries):
         try:
-            result = pd.read_sql(query, session.connection())
-            return result
+            final_df = pd.DataFrame()
+            for chunk_dataframe in pd.read_sql(query, conn, chunksize=10000):
+                print(f"Processing chunk with {len(chunk_dataframe)} rows")
+                print(
+                    f"Memory usage: {chunk_dataframe.memory_usage(index=True, deep=True).sum() / 1024 ** 2:.2f} MB"
+                )
+                final_df = pd.concat([final_df, chunk_dataframe], ignore_index=True)
+            return final_df.astype(dtype=dtype)
         except exc.OperationalError as e:
             if attempt == max_retries - 1:
                 raise e
             time.sleep(delay)
-        finally:
-            session.close()
 
 
 def get_learners_data(last_updated_at=None):
@@ -99,9 +104,33 @@ def get_learners_data(last_updated_at=None):
     LEFT JOIN tenant tn ON lr.tenant_id = tn.identifier
     """
 
+    dtype_dict = {
+        "tenant_name": "category",
+        "school": "category",
+        "grade": "category",
+        "learner_name": "category",
+        "learner_username": "category",
+        "learner_id": "string",  # Use string for UUIDs
+        "question_id": "string",
+        "question_set_id": "string",
+        "attempts_count": "int8",
+        "score": "int8",
+        "qset_grade_identifier": "string",
+        "operation_identifier": "string",
+        "qset_name": "category",
+        "qset_uid": "string",
+        "purpose": "category",
+        "repo_name_identifier": "string",
+        "l1_skill_identifier": "string",
+        "l2_skill_identifier": "string",
+        "l3_skill_identifier": "string",
+        "sequence": "int16",
+        "status": "category",
+    }
+
     if last_updated_at:
         query = query + f" WHERE lpd.updated_at >= '{last_updated_at.isoformat()}'"
-    return execute_query_with_retry(query)
+    return execute_query_with_retry(query, dtype=dtype_dict)
 
 
 def get_last_question_per_qset_grade():
@@ -133,7 +162,15 @@ def get_last_question_per_qset_grade():
     ON rqs.identifier = rq.question_set_id
     WHERE rqs.rn = 1 AND rq.rn=1;
     """
-    return execute_query_with_retry(query)
+
+    dtype_dict = {
+        "operation": "category",
+        "qset_grade": "category",
+        "question_set_id": "string",
+        "question_id": "string",
+    }
+
+    return execute_query_with_retry(query, dtype=dtype_dict)
 
 
 def get_all_learners():
@@ -146,7 +183,14 @@ def get_all_learners():
         FROM learner lr LEFT JOIN school sc 
         ON lr.school_id = sc.identifier
     """
-    return execute_query_with_retry(query)
+
+    dtype_dict = {
+        "identifier": "string",
+        "user_name": "category",
+        "name": "category",
+        "school": "category",
+    }
+    return execute_query_with_retry(query, dtype=dtype_dict)
 
 
 grades_priority = {
@@ -165,46 +209,56 @@ grades_priority = {
 
 def get_grades():
     query = "SELECT identifier, id, cm.name->>'en' AS grade FROM class_master cm"
-    return execute_query_with_retry(query)
+    dtype_dict = {
+        "grade": "category",
+    }
+    return execute_query_with_retry(query, dtype=dtype_dict)
 
 
 def get_schools():
     query = "SELECT name as school_name FROM school"
-    schools = execute_query_with_retry(query)
+    dtype_dict = {
+        "school_name": "category",
+    }
+    schools = execute_query_with_retry(query, dtype=dtype_dict)
     schools = pd.concat(
         [schools, pd.DataFrame({"school_name": ["No School"]})], ignore_index=True
     )
+    schools["school_name"] = schools["school_name"].astype("category")
     return schools
 
 
 def get_qset_types():
     query = "SELECT DISTINCT(purpose) FROM question_set"
-    return execute_query_with_retry(query)
+    dtype_dict = {
+        "purpose": "category",
+    }
+    return execute_query_with_retry(query, dtype=dtype_dict)
 
 
 def get_repository_names():
     query = "SELECT identifier, name->>'en' AS repo_name FROM repository"
-    return execute_query_with_retry(query)
+    dtype_dict = {
+        "repo_name": "category",
+    }
+    return execute_query_with_retry(query, dtype=dtype_dict)
 
 
-def get_l1_skills():
-    query = "SELECT identifier, name->>'en' as l1_skill FROM skill_master WHERE type='l1_skill'"
-    return execute_query_with_retry(query)
-
-
-def get_l2_skills():
-    query = "SELECT identifier, name->>'en' as l2_skill FROM skill_master WHERE type='l2_skill'"
-    return execute_query_with_retry(query)
-
-
-def get_l3_skills():
-    query = "SELECT identifier, name->>'en' as l3_skill FROM skill_master WHERE type='l3_skill'"
-    return execute_query_with_retry(query)
+def get_skills():
+    query = "SELECT identifier, name->>'en' as skill, type FROM skill_master"
+    dtype_dict = {
+        "skill": "category",
+        "type": "category",
+    }
+    return execute_query_with_retry(query, dtype=dtype_dict)
 
 
 def get_tenants():
     query = "SELECT DISTINCT(id), name->>'en' AS tenant_name FROM tenant"
-    return execute_query_with_retry(query)
+    dtype_dict = {
+        "tenant_name": "category",
+    }
+    return execute_query_with_retry(query, dtype=dtype_dict)
 
 
 def get_logged_in_users():
@@ -217,55 +271,165 @@ def get_logged_in_users():
         LEFT JOIN tenant tn ON tn.identifier = lr.tenant_id
         WHERE td.event_type = 'learner_logged_in'
     """
-    return execute_query_with_retry(query)
+    dtype_dict = {
+        "school": "category",
+        "grade": "category",
+        "tenant_name": "category",
+    }
+    return execute_query_with_retry(query, dtype=dtype_dict)
 
 
-def get_cached_data(key, fetch_function):
+def get_question_sequence_data():
+    print("Fetching question_sequence_data")
+    query = f"""
+    SELECT question_id, question_set_id, sequence FROM question_set_question_mapping
+    """
+    dtype_dict = {
+        "question_id": "string",
+        "question_set_id": "string",
+        "sequence": "int16",
+    }
+    question_sequence_data = execute_query_with_retry(query, dtype=dtype_dict)
+    return question_sequence_data
+
+
+def get_cached_data(key):
     last_fetched_time = redis_client.get(LAST_FETCHED_TIME_KEY)
     cached_data = redis_client.get(key)
 
-    # If cache exists and last_fetched_time is valid
-    if cached_data and last_fetched_time:
+    if (not cached_data) or (not last_fetched_time):
+        fetch_all_data()
+    elif last_fetched_time:
         last_fetched_time = datetime.fromisoformat(last_fetched_time.decode("utf-8"))
-
         # If last fetched time is less than 1 hour, return cached data
-        if (datetime.now() - last_fetched_time) < timedelta(hours=1):
-            print("Returning cached data for key:", key)
-            if key == ALL_LEARNER_DATA_KEY:
-                return pickle.loads(gzip.decompress(cached_data))
-            return pickle.loads(redis_client.get(key))
-
-    # If cache is expired or invalid, fetch new data for all keys
-    print("Cache expired or invalid. Fetching new data for all keys.")
-    fetch_function()
+        if (datetime.now() - last_fetched_time) > timedelta(hours=1):
+            fetch_all_data()
 
     # Return the data for the requested key
     if key == ALL_LEARNER_DATA_KEY:
         return pickle.loads(gzip.decompress(redis_client.get(key)))
+    elif key in [LAST_FETCHED_TIME_KEY, MAX_TIME_KEY, MIN_TIME_KEY]:
+        return redis_client.get(key)
     return pickle.loads(redis_client.get(key))
 
 
-def fetch_all_data():
-    if redis_client.get(ALL_LEARNER_DATA_KEY):
-        learners_data_cache = redis_client.get(ALL_LEARNER_DATA_KEY)
-        learner_data = pickle.loads(gzip.decompress(learners_data_cache))
+def store_in_redis(key, data):
+    """Serialize and store data in Redis."""
+    redis_client.set(key, data)
 
+
+def map_and_merge(df, ref_data, left_key, right_key, new_column):
+    """Generalized function to map and merge reference data."""
+    ref_data = ref_data.rename(columns={"skill": new_column})
+    df = df.merge(
+        ref_data[[right_key, new_column]],
+        left_on=left_key,
+        right_on=right_key,
+        how="left",
+    ).drop(columns=[right_key, left_key])
+    return df
+
+
+def update_cache():
+    """Fetch and update static datasets in Redis."""
+    cache_data = {
+        LAST_QUESTION_PER_QSET_GRADE_KEY: get_last_question_per_qset_grade(),
+        ALL_LEARNERS_KEY: get_all_learners(),
+        ALL_GRADES_KEY: get_grades(),
+        ALL_SCHOOLS_KEY: get_schools(),
+        ALL_QSET_TYPES_KEY: get_qset_types(),
+        ALL_REPOSITORY_NAMES_KEY: get_repository_names(),
+        ALL_SKILLS_KEY: get_skills(),
+        ALL_TENANTS_KEY: get_tenants(),
+        ALL_LOGGED_IN_USERS_KEY: get_logged_in_users(),
+        ALL_QUESTION_SEQUENCE_DATA: get_question_sequence_data(),
+    }
+
+    for key, data in cache_data.items():
+        store_in_redis(key, pickle.dumps(data))
+
+
+def process_learners_data(updated_data):
+    """Process and map learners' data with reference tables."""
+    grades = pickle.loads(redis_client.get(ALL_GRADES_KEY))
+    grades["grade"] = grades["id"].map(grades_priority)
+
+    # Map qset_grade
+    updated_data = updated_data.merge(
+        grades[["identifier", "grade"]].rename(columns={"grade": "qset_grade"}),
+        left_on="qset_grade_identifier",
+        right_on="identifier",
+        how="left",
+    ).drop(columns=["identifier", "qset_grade_identifier"])
+
+    # Map grade name
+    updated_data["grade"] = updated_data["grade"].astype(int).map(grades_priority)
+
+    # Fetch all skills
+    skills = pickle.loads(redis_client.get(ALL_SKILLS_KEY))
+
+    # Handle L1 Skill mapping (including 'operation')
+    l1_skill = skills[skills["type"] == "l1_skill"].rename(
+        columns={"skill": "l1_skill"}
+    )
+    updated_data = updated_data.merge(
+        l1_skill[["identifier", "l1_skill"]].rename(columns={"l1_skill": "operation"}),
+        left_on="operation_identifier",
+        right_on="identifier",
+        how="left",
+    ).drop(columns=["identifier", "operation_identifier"])
+
+    # Generalized mapping for skill levels (L1, L2, L3)
+    skill_types = ["l1_skill", "l2_skill", "l3_skill"]
+    for skill_type in skill_types:
+        filtered_skills = skills[skills["type"] == skill_type]
+        updated_data = map_and_merge(
+            updated_data,
+            filtered_skills,
+            f"{skill_type}_identifier",
+            "identifier",
+            skill_type,
+        )
+
+    # Map repository names
+    repo = pickle.loads(redis_client.get(ALL_REPOSITORY_NAMES_KEY))
+    updated_data = map_and_merge(
+        updated_data, repo, "repo_name_identifier", "identifier", "repo_name"
+    )
+
+    # Fill missing school values
+    updated_data["school"] = (
+        updated_data["school"].cat.add_categories("No School").fillna("No School")
+    )
+
+    return updated_data
+
+
+def fetch_all_data():
+    update_cache()
+
+    if redis_client.get(ALL_LEARNER_DATA_KEY):
+        learner_data = pickle.loads(
+            gzip.decompress(redis_client.get(ALL_LEARNER_DATA_KEY))
+        )
         max_updated_at = pd.to_datetime(learner_data["updated_at"]).max()
         updated_data = get_learners_data(max_updated_at)
 
         if not updated_data.empty:
+            updated_data = process_learners_data(updated_data)
             all_learners_data = (
                 pd.concat([learner_data, updated_data])
                 .drop_duplicates()
                 .reset_index(drop=True)
             )
 
-            # Compress before storing in Redis
-            redis_client.set(
-                ALL_LEARNER_DATA_KEY,
-                gzip.compress(pickle.dumps(all_learners_data)),
+            store_in_redis(
+                ALL_LEARNER_DATA_KEY, gzip.compress(pickle.dumps(all_learners_data))
             )
             redis_client.set(LAST_FETCHED_TIME_KEY, datetime.now().isoformat())
+            redis_client.set(
+                MAX_TIME_KEY, all_learners_data["updated_at"].max().isoformat()
+            )
 
             print(
                 f"Updated cache with {updated_data.shape[0]} new records for {ALL_LEARNER_DATA_KEY}"
@@ -275,143 +439,28 @@ def fetch_all_data():
             print(f"No new updates for {ALL_LEARNER_DATA_KEY}. Returning cached data.")
     else:
         all_learners_data = get_learners_data()
-        redis_client.set(
+        all_learners_data = process_learners_data(all_learners_data)
+
+        store_in_redis(
             ALL_LEARNER_DATA_KEY, gzip.compress(pickle.dumps(all_learners_data))
         )
         redis_client.set(LAST_FETCHED_TIME_KEY, datetime.now().isoformat())
-
-    # Fetch and update other keys
-    other_data_keys = {
-        LAST_QUESTION_PER_QSET_GRADE_KEY: get_last_question_per_qset_grade(),
-        ALL_LEARNERS_KEY: get_all_learners(),
-        ALL_GRADES_KEY: get_grades(),
-        ALL_SCHOOLS_KEY: get_schools(),
-        ALL_QSET_TYPES_KEY: get_qset_types(),
-        ALL_REPOSITORY_NAMES_KEY: get_repository_names(),
-        ALL_L1_SKILLS_KEY: get_l1_skills(),
-        ALL_L2_SKILLS_KEY: get_l2_skills(),
-        ALL_L3_SKILLS_KEY: get_l3_skills(),
-        ALL_TENANTS_KEY: get_tenants(),
-        ALL_LOGGED_IN_USERS_KEY: get_logged_in_users(),
-    }
-
-    for key, data in other_data_keys.items():
-        redis_client.set(key, pickle.dumps(data))
+        redis_client.set(
+            MIN_TIME_KEY, all_learners_data["updated_at"].min().isoformat()
+        )
+        redis_client.set(
+            MAX_TIME_KEY, all_learners_data["updated_at"].max().isoformat()
+        )
 
     print("Updated cache with new data for all keys")
 
 
 def get_data(key):
-    if key == ALL_LEARNER_DATA_KEY:
-        all_learners_data = get_cached_data(key, fetch_all_data)
-        all_learners_data["updated_at"] = pd.to_datetime(
-            all_learners_data["updated_at"]
-        )
-        all_learners_data["school"].fillna("No School", inplace=True)
-        return all_learners_data
-    elif key == LAST_QUESTION_PER_QSET_GRADE_KEY:
-        return get_cached_data(key, fetch_all_data)
-    elif key == ALL_LEARNERS_KEY:
-        return get_cached_data(key, fetch_all_data)
-    elif key == ALL_GRADES_KEY:
-        grades = get_cached_data(key, fetch_all_data)
-        grades["grade"] = grades["id"].map(grades_priority)
-        return grades
-    elif key == ALL_SCHOOLS_KEY:
-        all_schools = get_cached_data(key, fetch_all_data)
-        return all_schools
-    elif key == ALL_QSET_TYPES_KEY:
-        all_qset_types = get_cached_data(key, fetch_all_data)
-        return all_qset_types
-    elif key == ALL_REPOSITORY_NAMES_KEY:
-        all_repositories = get_cached_data(key, fetch_all_data)
-        return all_repositories
-    elif key == ALL_L1_SKILLS_KEY:
-        all_l1_skills = get_cached_data(key, fetch_all_data)
-        return all_l1_skills
-    elif key == ALL_L2_SKILLS_KEY:
-        all_l2_skills = get_cached_data(key, fetch_all_data)
-        return all_l2_skills
-    elif key == ALL_L3_SKILLS_KEY:
-        all_l3_skills = get_cached_data(key, fetch_all_data)
-        return all_l3_skills
-    elif key == ALL_TENANTS_KEY:
-        all_tenants = get_cached_data(key, fetch_all_data)
-        return all_tenants
-    elif key == ALL_LOGGED_IN_USERS_KEY:
-        all_logged_in_users_list = get_cached_data(key, fetch_all_data)
-        return all_logged_in_users_list
-    elif key == LAST_FETCHED_TIME_KEY:
-        return redis_client.get(LAST_FETCHED_TIME_KEY)
-    else:
-        raise ValueError("Invalid key provided")
+    return get_cached_data(key)
 
 
 def get_all_learners_data_df():
-    all_learners_data = get_data(ALL_LEARNER_DATA_KEY)
-
-    # Map qset_grade name based on qset_grade_identifier
-    grades = get_data(ALL_GRADES_KEY)
-    all_learners_data = all_learners_data.merge(
-        grades[["identifier", "grade"]].rename(columns={"grade": "qset_grade"}),
-        left_on="qset_grade_identifier",
-        right_on="identifier",
-        how="left",
-    ).drop(columns=["identifier", "qset_grade_identifier"])
-
-    # Map grade name on grade
-    all_learners_data["grade"] = all_learners_data["grade"].astype(int)
-    all_learners_data["grade"] = all_learners_data["grade"].map(grades_priority)
-
-    # Map operation name based on operation_identifier
-    l1_skill = get_data(ALL_L1_SKILLS_KEY)
-    all_learners_data = all_learners_data.merge(
-        l1_skill[["identifier", "l1_skill"]].rename(columns={"l1_skill": "operation"}),
-        left_on="operation_identifier",
-        right_on="identifier",
-        how="left",
-    ).drop(columns=["identifier", "operation_identifier"])
-
-    # Map l1 skill name based on l1_skill_identifier
-    l1_skill = get_data(ALL_L1_SKILLS_KEY)
-    all_learners_data = all_learners_data.merge(
-        l1_skill[["identifier", "l1_skill"]],
-        left_on="l1_skill_identifier",
-        right_on="identifier",
-        how="left",
-    ).drop(columns=["identifier", "l1_skill_identifier"])
-
-    # Map l2 skill name based on l2_skill_identifier
-    l2_skill = get_data(ALL_L2_SKILLS_KEY)
-    all_learners_data = all_learners_data.merge(
-        l2_skill[["identifier", "l2_skill"]],
-        left_on="l2_skill_identifier",
-        right_on="identifier",
-        how="left",
-    ).drop(columns=["identifier", "l2_skill_identifier"])
-
-    # Map l3 skill name based on l3_skill_identifier
-    l3_skill = get_data(ALL_L3_SKILLS_KEY)
-    all_learners_data = all_learners_data.merge(
-        l3_skill[["identifier", "l3_skill"]],
-        left_on="l3_skill_identifier",
-        right_on="identifier",
-        how="left",
-    ).drop(columns=["identifier", "l3_skill_identifier"])
-
-    # Map Repository name based on repo_name_identifier
-    repo = get_data(ALL_REPOSITORY_NAMES_KEY)
-    all_learners_data = all_learners_data.merge(
-        repo[["identifier", "repo_name"]],
-        left_on="repo_name_identifier",
-        right_on="identifier",
-        how="left",
-    ).drop(columns=["identifier", "repo_name_identifier"])
-
-    all_learners_data["updated_at"] = pd.to_datetime(all_learners_data["updated_at"])
-    all_learners_data["school"].fillna("No School", inplace=True)
-
-    return all_learners_data
+    return get_data(ALL_LEARNER_DATA_KEY)
 
 
 def get_repository_names_list():
@@ -420,17 +469,23 @@ def get_repository_names_list():
 
 
 def get_l1_skills_list():
-    l1_skill = get_data(ALL_L1_SKILLS_KEY)
+    skills = get_data(ALL_SKILLS_KEY)
+    l1_skill = skills[skills["type"] == "l1_skill"]
+    l1_skill = l1_skill.rename(columns={"skill": "l1_skill"})
     return l1_skill["l1_skill"].sort_values().unique()
 
 
 def get_l2_skills_list():
-    l2_skill = get_data(ALL_L2_SKILLS_KEY)
+    skills = get_data(ALL_SKILLS_KEY)
+    l2_skill = skills[skills["type"] == "l2_skill"]
+    l2_skill = l2_skill.rename(columns={"skill": "l2_skill"})
     return l2_skill["l2_skill"].sort_values().unique()
 
 
 def get_l3_skills_list():
-    l3_skill = get_data(ALL_L3_SKILLS_KEY)
+    skills = get_data(ALL_SKILLS_KEY)
+    l3_skill = skills[skills["type"] == "l3_skill"]
+    l3_skill = l3_skill.rename(columns={"skill": "l3_skill"})
     return l3_skill["l3_skill"].sort_values().unique()
 
 
@@ -451,16 +506,23 @@ def get_tenants_list():
 
 def get_grades_list():
     grades = get_data(ALL_GRADES_KEY)
+    grades["grade"] = grades["id"].map(grades_priority)
     return grades.drop(columns=["identifier"])
 
 
 # Minimum - Maximum Learners Data Timestamp
 def get_min_max_timestamp(key):
-    print("Fetching get_min_max_timestamp")
     # Minimum - Maximum Date
-    all_learners_data = get_data(ALL_LEARNER_DATA_KEY)
-    min_timestamp = all_learners_data["updated_at"].min()
-    max_timestamp = all_learners_data["updated_at"].max()
+    min_timestamp = (
+        get_data(MIN_TIME_KEY).decode("utf-8")
+        if get_data(MIN_TIME_KEY)
+        else datetime.now()
+    )
+    max_timestamp = (
+        get_data(MAX_TIME_KEY).decode("utf-8")
+        if get_data(MAX_TIME_KEY)
+        else datetime.now()
+    )
 
     if key == "min":
         return min_timestamp
@@ -468,7 +530,6 @@ def get_min_max_timestamp(key):
 
 
 def last_synced_time():
-    print("Fetching last_synced_time")
     last_synced_at = get_data(LAST_FETCHED_TIME_KEY)
 
     return last_synced_at.decode("utf-8")
@@ -483,16 +544,37 @@ def get_non_diagnostic_data():
     return non_diagnostic_data
 
 
+def get_all_learners_df():
+    return get_data(ALL_LEARNERS_KEY)
+
+
+def get_logged_in_users_data_df():
+    return get_data(ALL_LOGGED_IN_USERS_KEY)
+
+
+def get_question_sequence_data_df():
+    return get_data(ALL_QUESTION_SEQUENCE_DATA)
+
+
+def get_last_question_per_qset_grade_df():
+    return get_data(LAST_QUESTION_PER_QSET_GRADE_KEY)
+
+
 def get_all_question_sets(repository_name):
     print("Fetching all_question_sets")
     # Fetch distinct question set IDs from the database
-    query = f"SELECT DISTINCT(qs.x_id) AS qset_id FROM question_set qs LEFT JOIN repository repo ON repo.identifier = qs.repository->>'identifier'"
+    query = f"""
+        SELECT DISTINCT(qs.x_id) AS qset_id FROM question_set qs LEFT JOIN repository repo ON repo.identifier = qs.repository->>'identifier'
+    """
 
     # Add condition for repository name if provided
     if repository_name:
         query += f" WHERE repo.name->>'en'='{repository_name}'"
 
-    question_set_ids = execute_query_with_retry(query)
+    dtype_dict = {
+        "qset_id": "string",
+    }
+    question_set_ids = execute_query_with_retry(query, dtype=dtype_dict)
     return question_set_ids["qset_id"].sort_values().unique()
 
 
@@ -502,10 +584,10 @@ def get_question_level_data(selected_qset):
         SELECT
             lpd.question_set_id,
             qs.x_id AS question_set_uid,
-            qs.sequence qs_seq,
+            qs.sequence AS qs_seq,
             lpd.question_id,
             ques.x_id AS question_uid,
-            qsqm.sequence q_seq,
+            qsqm.sequence AS q_seq,
             lpd.learner_id,
             lpd.score,
             lpd.updated_at,
@@ -516,18 +598,19 @@ def get_question_level_data(selected_qset):
         LEFT JOIN question ques ON ques.identifier=lpd.question_id
         WHERE qs.x_id='{selected_qset}'
     """
+    dtype_dict = {
+        "question_set_id": "string",
+        "question_set_uid": "string",
+        "qs_seq": "int16",
+        "question_id": "string",
+        "question_uid": "string",
+        "q_seq": "int16",
+        "learner_id": "string",
+        "score": "int8",
+    }
 
-    question_level_data = execute_query_with_retry(query)
+    question_level_data = execute_query_with_retry(query, dtype=dtype_dict)
     return question_level_data
-
-
-def get_question_sequence_data():
-    print("Fetching question_sequence_data")
-    query = f"""
-    SELECT question_id, question_set_id, sequence FROM question_set_question_mapping
-    """
-    question_sequence_data = execute_query_with_retry(query)
-    return question_sequence_data
 
 
 def get_qset_score_data(selected_sheet_type, selected_repo):
@@ -556,7 +639,13 @@ def get_qset_score_data(selected_sheet_type, selected_repo):
     WHERE lj.status='completed' {sheet_type_filter} {repo_filter}
     GROUP BY lpd.taxonomy->'l1_skill'->'name'->'en', lpd.taxonomy->'class'->'name'->'en', lpd.question_set_id, qs.title->'en'
     """
-    qset_score_data = execute_query_with_retry(query)
+    dtype_dict = {
+        "operation": "category",
+        "qset_grade": "category",
+        "question_set_id": "string",
+        "qset_name": "category",
+    }
+    qset_score_data = execute_query_with_retry(query, dtype=dtype_dict)
     return qset_score_data
 
 
@@ -586,5 +675,10 @@ def get_qset_agg_data(selected_sheet_type, selected_repo):
     WHERE lj.status='completed' {sheet_type_filter} {repo_filter}
     GROUP BY lpd.taxonomy->'l1_skill'->'name'->'en', lpd.taxonomy->'class'->'name'->'en'
     """
-    qset_agg_data = execute_query_with_retry(query)
+    dtype_dict = {
+        "operation": "category",
+        "qset_grade": "category",
+        "attempts_count": "int8",
+    }
+    qset_agg_data = execute_query_with_retry(query, dtype=dtype_dict)
     return qset_agg_data
